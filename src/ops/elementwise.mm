@@ -59,6 +59,7 @@ MNTensor dispatch_binary_op(const MNTensor& a,
         [encoder setBuffer:output.buffer()->metal_buffer() offset:output.offset() atIndex:2];
 
         // Pass num_elements to kernel (required at buffer(3))
+        MN_CHECK(numel <= UINT32_MAX, MetalNativeError::InvalidArgument, "elementwise: dimension exceeds uint32_t range");
         uint32_t num_elements = static_cast<uint32_t>(numel);
         [encoder setBytes:&num_elements length:sizeof(uint32_t) atIndex:3];
 
@@ -112,6 +113,7 @@ MNTensor dispatch_unary_op(const MNTensor& x,
         [encoder setBuffer:output.buffer()->metal_buffer() offset:output.offset() atIndex:1];
 
         // Pass num_elements to kernel (required at buffer(2))
+        MN_CHECK(numel <= UINT32_MAX, MetalNativeError::InvalidArgument, "elementwise: dimension exceeds uint32_t range");
         uint32_t num_elements = static_cast<uint32_t>(numel);
         [encoder setBytes:&num_elements length:sizeof(uint32_t) atIndex:2];
 
@@ -195,6 +197,7 @@ MNTensor sqrt(const MNTensor& x, MNDevice& device) {
         [encoder setBuffer:output.buffer()->metal_buffer() offset:output.offset() atIndex:1];
 
         // Pass num_elements to kernel (required at buffer(2))
+        MN_CHECK(numel <= UINT32_MAX, MetalNativeError::InvalidArgument, "elementwise: dimension exceeds uint32_t range");
         uint32_t num_elements = static_cast<uint32_t>(numel);
         [encoder setBytes:&num_elements length:sizeof(uint32_t) atIndex:2];
 
@@ -259,6 +262,7 @@ MNTensor clamp(const MNTensor& x, float min_val, float max_val, MNDevice& device
         [encoder setBytes:&bounds length:sizeof(bounds) atIndex:2];
 
         // Pass num_elements to kernel (required at buffer(3))
+        MN_CHECK(numel <= UINT32_MAX, MetalNativeError::InvalidArgument, "elementwise: dimension exceeds uint32_t range");
         uint32_t num_elements = static_cast<uint32_t>(numel);
         [encoder setBytes:&num_elements length:sizeof(uint32_t) atIndex:3];
 

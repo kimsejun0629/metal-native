@@ -706,3 +706,279 @@ kernel void rms_norm_vec_fp16(
         output[base_offset + idx] = half(val * inv_rms * float(weight[idx]));
     }
 }
+
+// ============================================================================
+// LARGE NORM KERNELS (norm_size >= 2048)
+// ============================================================================
+// These kernels use 256 threads per threadgroup (8 SIMD groups) for high GPU
+// occupancy on large norm_size. Each threadgroup processes one row.
+//
+// Reduction strategy:
+//   1. Each thread accumulates partial sums in a strided loop (stride = 256)
+//   2. simd_sum() reduces within each 32-thread SIMD group
+//   3. Lane 0 of each SIMD group writes to shared memory (8 floats)
+//   4. First SIMD group reduces the 8 partial results
+//
+// This achieves ~20-40% GPU occupancy vs ~0.3% for the 32-thread design,
+// yielding significant speedups for norm_size >= 2048.
+// ============================================================================
+
+constant constexpr uint LARGE_NORM_THREADS = 256;
+constant constexpr uint LARGE_NORM_SIMD_GROUPS = LARGE_NORM_THREADS / 32;  // 8
+
+kernel void layer_norm_large_fp32(
+    device const float* input       [[buffer(0)]],
+    device const float* weight      [[buffer(1)]],
+    device const float* bias        [[buffer(2)]],
+    device float* output            [[buffer(3)]],
+    constant uint& batch_size       [[buffer(4)]],
+    constant uint& norm_size        [[buffer(5)]],
+    constant float& eps             [[buffer(6)]],
+    threadgroup float* shared       [[threadgroup(0)]],  // 8 floats for sum + 8 for sq_sum = 16 floats
+    uint  tg_idx                    [[threadgroup_position_in_grid]],
+    uint  tid_in_tg                 [[thread_index_in_threadgroup]],
+    uint  simd_group_id             [[simdgroup_index_in_threadgroup]],
+    uint  simd_lane_id              [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = tg_idx;
+    if (batch_idx >= batch_size) return;
+
+    const uint base_offset = batch_idx * norm_size;
+
+    // Shared memory layout: [0..7] = partial sums, [8..15] = partial sq_sums
+    threadgroup float* shared_sum = shared;
+    threadgroup float* shared_sq_sum = shared + LARGE_NORM_SIMD_GROUPS;
+
+    // Pass 1: Each thread accumulates partial sums with stride 256
+    float partial_sum = 0.0f;
+    float partial_sq_sum = 0.0f;
+
+    for (uint i = tid_in_tg; i < norm_size; i += LARGE_NORM_THREADS) {
+        float val = input[base_offset + i];
+        partial_sum += val;
+        partial_sq_sum += val * val;
+    }
+
+    // Intra-SIMD reduction
+    partial_sum = simd_sum(partial_sum);
+    partial_sq_sum = simd_sum(partial_sq_sum);
+
+    // Lane 0 of each SIMD group writes to shared memory
+    if (simd_lane_id == 0) {
+        shared_sum[simd_group_id] = partial_sum;
+        shared_sq_sum[simd_group_id] = partial_sq_sum;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // First SIMD group reduces the 8 partial results
+    float total_sum = 0.0f;
+    float total_sq_sum = 0.0f;
+    if (simd_group_id == 0 && simd_lane_id < LARGE_NORM_SIMD_GROUPS) {
+        total_sum = shared_sum[simd_lane_id];
+        total_sq_sum = shared_sq_sum[simd_lane_id];
+    }
+    if (simd_group_id == 0) {
+        total_sum = simd_sum(total_sum);
+        total_sq_sum = simd_sum(total_sq_sum);
+        if (simd_lane_id == 0) {
+            shared_sum[0] = total_sum;
+            shared_sq_sum[0] = total_sq_sum;
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // All threads read the final stats
+    float mean = shared_sum[0] / float(norm_size);
+    float variance = shared_sq_sum[0] / float(norm_size) - mean * mean;
+    float inv_std = 1.0f / sqrt(max(variance, 0.0f) + eps);
+
+    // Pass 2: Normalize and apply affine transform (all 256 threads)
+    for (uint i = tid_in_tg; i < norm_size; i += LARGE_NORM_THREADS) {
+        float normalized = (input[base_offset + i] - mean) * inv_std;
+        output[base_offset + i] = normalized * weight[i] + bias[i];
+    }
+}
+
+kernel void layer_norm_large_fp16(
+    device const half* input        [[buffer(0)]],
+    device const half* weight       [[buffer(1)]],
+    device const half* bias         [[buffer(2)]],
+    device half* output             [[buffer(3)]],
+    constant uint& batch_size       [[buffer(4)]],
+    constant uint& norm_size        [[buffer(5)]],
+    constant float& eps             [[buffer(6)]],
+    threadgroup float* shared       [[threadgroup(0)]],
+    uint  tg_idx                    [[threadgroup_position_in_grid]],
+    uint  tid_in_tg                 [[thread_index_in_threadgroup]],
+    uint  simd_group_id             [[simdgroup_index_in_threadgroup]],
+    uint  simd_lane_id              [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = tg_idx;
+    if (batch_idx >= batch_size) return;
+
+    const uint base_offset = batch_idx * norm_size;
+
+    threadgroup float* shared_sum = shared;
+    threadgroup float* shared_sq_sum = shared + LARGE_NORM_SIMD_GROUPS;
+
+    // Pass 1: FP32 accumulation for numerical stability
+    float partial_sum = 0.0f;
+    float partial_sq_sum = 0.0f;
+
+    for (uint i = tid_in_tg; i < norm_size; i += LARGE_NORM_THREADS) {
+        float val = float(input[base_offset + i]);
+        partial_sum += val;
+        partial_sq_sum += val * val;
+    }
+
+    partial_sum = simd_sum(partial_sum);
+    partial_sq_sum = simd_sum(partial_sq_sum);
+
+    if (simd_lane_id == 0) {
+        shared_sum[simd_group_id] = partial_sum;
+        shared_sq_sum[simd_group_id] = partial_sq_sum;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float total_sum = 0.0f;
+    float total_sq_sum = 0.0f;
+    if (simd_group_id == 0 && simd_lane_id < LARGE_NORM_SIMD_GROUPS) {
+        total_sum = shared_sum[simd_lane_id];
+        total_sq_sum = shared_sq_sum[simd_lane_id];
+    }
+    if (simd_group_id == 0) {
+        total_sum = simd_sum(total_sum);
+        total_sq_sum = simd_sum(total_sq_sum);
+        if (simd_lane_id == 0) {
+            shared_sum[0] = total_sum;
+            shared_sq_sum[0] = total_sq_sum;
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float mean = shared_sum[0] / float(norm_size);
+    float variance = shared_sq_sum[0] / float(norm_size) - mean * mean;
+    float inv_std = 1.0f / sqrt(max(variance, 0.0f) + eps);
+
+    // Pass 2: Normalize with FP32 math, store as FP16
+    for (uint i = tid_in_tg; i < norm_size; i += LARGE_NORM_THREADS) {
+        float normalized = (float(input[base_offset + i]) - mean) * inv_std;
+        output[base_offset + i] = half(normalized * float(weight[i]) + float(bias[i]));
+    }
+}
+
+kernel void rms_norm_large_fp32(
+    device const float* input       [[buffer(0)]],
+    device const float* weight      [[buffer(1)]],
+    device float* output            [[buffer(2)]],
+    constant uint& batch_size       [[buffer(3)]],
+    constant uint& norm_size        [[buffer(4)]],
+    constant float& eps             [[buffer(5)]],
+    threadgroup float* shared       [[threadgroup(0)]],  // 8 floats for partial sq_sums
+    uint  tg_idx                    [[threadgroup_position_in_grid]],
+    uint  tid_in_tg                 [[thread_index_in_threadgroup]],
+    uint  simd_group_id             [[simdgroup_index_in_threadgroup]],
+    uint  simd_lane_id              [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = tg_idx;
+    if (batch_idx >= batch_size) return;
+
+    const uint base_offset = batch_idx * norm_size;
+
+    // Pass 1: Compute sum of squares
+    float partial_sq_sum = 0.0f;
+
+    for (uint i = tid_in_tg; i < norm_size; i += LARGE_NORM_THREADS) {
+        float val = input[base_offset + i];
+        partial_sq_sum += val * val;
+    }
+
+    partial_sq_sum = simd_sum(partial_sq_sum);
+
+    if (simd_lane_id == 0) {
+        shared[simd_group_id] = partial_sq_sum;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float total_sq_sum = 0.0f;
+    if (simd_group_id == 0 && simd_lane_id < LARGE_NORM_SIMD_GROUPS) {
+        total_sq_sum = shared[simd_lane_id];
+    }
+    if (simd_group_id == 0) {
+        total_sq_sum = simd_sum(total_sq_sum);
+        if (simd_lane_id == 0) {
+            shared[0] = total_sq_sum;
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float rms = sqrt(shared[0] / float(norm_size) + eps);
+    float inv_rms = 1.0f / rms;
+
+    // Pass 2: Normalize and apply weight (all 256 threads)
+    for (uint i = tid_in_tg; i < norm_size; i += LARGE_NORM_THREADS) {
+        output[base_offset + i] = input[base_offset + i] * inv_rms * weight[i];
+    }
+}
+
+kernel void rms_norm_large_fp16(
+    device const half* input        [[buffer(0)]],
+    device const half* weight       [[buffer(1)]],
+    device half* output             [[buffer(2)]],
+    constant uint& batch_size       [[buffer(3)]],
+    constant uint& norm_size        [[buffer(4)]],
+    constant float& eps             [[buffer(5)]],
+    threadgroup float* shared       [[threadgroup(0)]],
+    uint  tg_idx                    [[threadgroup_position_in_grid]],
+    uint  tid_in_tg                 [[thread_index_in_threadgroup]],
+    uint  simd_group_id             [[simdgroup_index_in_threadgroup]],
+    uint  simd_lane_id              [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = tg_idx;
+    if (batch_idx >= batch_size) return;
+
+    const uint base_offset = batch_idx * norm_size;
+
+    // Pass 1: FP32 accumulation
+    float partial_sq_sum = 0.0f;
+
+    for (uint i = tid_in_tg; i < norm_size; i += LARGE_NORM_THREADS) {
+        float val = float(input[base_offset + i]);
+        partial_sq_sum += val * val;
+    }
+
+    partial_sq_sum = simd_sum(partial_sq_sum);
+
+    if (simd_lane_id == 0) {
+        shared[simd_group_id] = partial_sq_sum;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float total_sq_sum = 0.0f;
+    if (simd_group_id == 0 && simd_lane_id < LARGE_NORM_SIMD_GROUPS) {
+        total_sq_sum = shared[simd_lane_id];
+    }
+    if (simd_group_id == 0) {
+        total_sq_sum = simd_sum(total_sq_sum);
+        if (simd_lane_id == 0) {
+            shared[0] = total_sq_sum;
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float rms = sqrt(shared[0] / float(norm_size) + eps);
+    float inv_rms = 1.0f / rms;
+
+    // Pass 2: Normalize with FP32 math, store as FP16
+    for (uint i = tid_in_tg; i < norm_size; i += LARGE_NORM_THREADS) {
+        output[base_offset + i] = half(float(input[base_offset + i]) * inv_rms * float(weight[i]));
+    }
+}

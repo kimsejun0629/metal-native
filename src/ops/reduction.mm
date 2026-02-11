@@ -99,6 +99,9 @@ MNTensor dispatch_reduction(const MNTensor& input,
         [encoder setBuffer:output.buffer()->metal_buffer() offset:output.offset() atIndex:1];
 
         // Pass reduction parameters
+        MN_CHECK(outer_size <= UINT32_MAX, MetalNativeError::InvalidArgument, "reduction: dimension exceeds uint32_t range");
+        MN_CHECK(reduce_size <= UINT32_MAX, MetalNativeError::InvalidArgument, "reduction: dimension exceeds uint32_t range");
+        MN_CHECK(inner_size <= UINT32_MAX, MetalNativeError::InvalidArgument, "reduction: dimension exceeds uint32_t range");
         uint32_t constants[3] = {
             static_cast<uint32_t>(outer_size),
             static_cast<uint32_t>(reduce_size),

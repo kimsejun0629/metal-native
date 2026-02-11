@@ -74,6 +74,9 @@ MNTensor embedding(const MNTensor& indices,
         [encoder setBuffer:output.buffer()->metal_buffer() offset:output.offset() atIndex:2];
 
         // Pass constants
+        MN_CHECK(num_indices <= UINT32_MAX, MetalNativeError::InvalidArgument, "embedding: dimension exceeds uint32_t range");
+        MN_CHECK(vocab_size <= UINT32_MAX, MetalNativeError::InvalidArgument, "embedding: dimension exceeds uint32_t range");
+        MN_CHECK(embed_dim <= UINT32_MAX, MetalNativeError::InvalidArgument, "embedding: dimension exceeds uint32_t range");
         uint32_t constants[3] = {
             static_cast<uint32_t>(num_indices),
             static_cast<uint32_t>(vocab_size),
@@ -162,6 +165,10 @@ MNTensor rope_embedding(const MNTensor& input,
         [encoder setBuffer:output.buffer()->metal_buffer() offset:output.offset() atIndex:4];
 
         // Pass constants
+        MN_CHECK(batch <= UINT32_MAX, MetalNativeError::InvalidArgument, "embedding: dimension exceeds uint32_t range");
+        MN_CHECK(seq_len <= UINT32_MAX, MetalNativeError::InvalidArgument, "embedding: dimension exceeds uint32_t range");
+        MN_CHECK(num_heads <= UINT32_MAX, MetalNativeError::InvalidArgument, "embedding: dimension exceeds uint32_t range");
+        MN_CHECK(head_dim <= UINT32_MAX, MetalNativeError::InvalidArgument, "embedding: dimension exceeds uint32_t range");
         uint32_t constants[4] = {
             static_cast<uint32_t>(batch),
             static_cast<uint32_t>(seq_len),

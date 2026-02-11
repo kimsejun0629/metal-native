@@ -2,6 +2,7 @@
 /// @brief Objective-C++ implementation of MNBuffer.
 
 #import <Metal/Metal.h>
+#include <mach/mach.h>
 
 #include "metal_native/core/buffer.h"
 #include "metal_native/core/device.h"
@@ -204,6 +205,26 @@ std::shared_ptr<MNBuffer> MNBuffer::wrap_external(
                  MetalNativeError::AllocationFailed,
                  "wrap_external: buffer allocation failed (size=" +
                  std::to_string(size) + " bytes)");
+
+        // Probe the source memory before bulk copy to avoid SIGBUS from
+        // non-CPU-accessible GPU pointers (e.g., large MPS data_ptr()).
+        {
+            vm_size_t probe_size = std::min<size_t>(size, 4096);  // Probe first page
+            char probe_buf[4096];
+            vm_size_t out_size = 0;
+            kern_return_t kr = vm_read_overwrite(
+                mach_task_self(),
+                reinterpret_cast<vm_address_t>(data_ptr),
+                probe_size,
+                reinterpret_cast<vm_address_t>(probe_buf),
+                &out_size);
+
+            MN_CHECK(kr == KERN_SUCCESS,
+                     MetalNativeError::InvalidArgument,
+                     "wrap_external: source memory is not CPU-accessible "
+                     "(likely an MPS GPU pointer). Use tensor_from_cpu_data() "
+                     "for safe CPU→Metal tensor creation instead.");
+        }
 
         std::memcpy([buf->impl_->buffer contents], data_ptr, size);
 

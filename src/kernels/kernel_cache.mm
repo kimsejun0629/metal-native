@@ -17,8 +17,9 @@ namespace metal_native {
 // ---------------------------------------------------------------------------
 
 struct KernelCache::Impl {
-    /// Each entry stores the key and pipeline state.
-    using Entry = std::pair<std::string, id<MTLComputePipelineState>>;
+    /// Each entry stores the key and pipeline state (as void* to keep the
+    /// public API ABI-stable across ObjC++ and pure-C++ translation units).
+    using Entry = std::pair<std::string, void*>;
 
     /// Doubly-linked list ordered from most-recently-used (front) to
     /// least-recently-used (back).
@@ -50,11 +51,11 @@ KernelCache& KernelCache::operator=(KernelCache&&) noexcept = default;
 // Lookup
 // ---------------------------------------------------------------------------
 
-id<MTLComputePipelineState> KernelCache::get(const std::string& key) {
+void* KernelCache::get(const std::string& key) {
     auto it = impl_->map.find(key);
     if (it == impl_->map.end()) {
         ++impl_->misses;
-        return nil;
+        return nullptr;
     }
 
     // Move the accessed entry to the front (most-recently-used).
@@ -67,8 +68,7 @@ id<MTLComputePipelineState> KernelCache::get(const std::string& key) {
 // Insert
 // ---------------------------------------------------------------------------
 
-void KernelCache::put(const std::string& key,
-                      id<MTLComputePipelineState> pipeline) {
+void KernelCache::put(const std::string& key, void* pipeline) {
     auto it = impl_->map.find(key);
     if (it != impl_->map.end()) {
         // Update existing entry and promote to front.

@@ -9,6 +9,7 @@
 #include "metal_native/core/device.h"
 #include "metal_native/core/error.h"
 
+#include <atomic>
 #include <mutex>
 #include <vector>
 
@@ -26,7 +27,7 @@ struct CommandPipeline::Impl {
     mutable std::mutex      mu;
     id<MTLCommandBuffer>    active_buffer = nil;
     bool                    has_active    = false;
-    bool                    lazy_commit   = false;
+    std::atomic<bool>       lazy_commit{false};
 
     explicit Impl(MNDevice& dev, size_t count)
         : device(dev)

@@ -39,33 +39,27 @@ MNTensor layer_norm(const MNTensor& input,
              MetalNativeError::InvalidArgument,
              "layer_norm: all inputs must have the same dtype");
 
-    // REMOVED: Artificial size limitation that was causing regression.
-    // The custom kernel now handles all sizes. For norm_size >= 2048, the kernel
-    // uses a 32-thread SIMD-cooperative design where each thread processes norm_size/32
-    // elements in a strided loop. While GPU occupancy is lower than MPS for very large
-    // norm_size (e.g., 4096), the kernel is still competitive due to:
-    // 1. Efficient SIMD reduction (simd_sum) for statistics computation
-    // 2. Command buffer reuse (commit_and_continue) reducing overhead
-    // 3. Fused operations (compute stats + normalize + affine in one pass)
-    //
-    // Future optimization (Task 1.2): Multi-threadgroup design for norm_size >= 2048
-    // to increase GPU occupancy from ~0.3% to 20-40% on M4 Max.
-
     @autoreleasepool {
         MNDevice& device = MNDevice::instance();
         MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device);
 
-        // Determine kernel variant based on norm_size
-        // Use vectorized kernels for norm_size >= 128 (4x bandwidth improvement)
-        // Constraint: threadgroup memory limit is 32KB, so norm_size * sizeof(float) <= 32768
-        // This means norm_size <= 8192 for vectorized kernels
-        const bool use_vectorized = (norm_size >= 128 && norm_size <= 8192);
+        // Kernel selection strategy:
+        // - norm_size >= 2048: "large" kernels with 256 threads (8 SIMD groups) per row.
+        //   Achieves ~20-40% GPU occupancy vs ~0.3% for the old 32-thread design.
+        // - 128 <= norm_size < 2048: vectorized kernels (32 threads, float4/half4 loads)
+        // - norm_size < 128: basic scalar kernels (32 threads)
+        const bool use_large = (norm_size >= 2048);
+        const bool use_vectorized = (!use_large && norm_size >= 128 && norm_size <= 8192);
 
         const char* kernel_name = nullptr;
         if (input.dtype() == MNDType::Float32) {
-            kernel_name = use_vectorized ? "layer_norm_vec_fp32" : "layer_norm_kernel";
+            if (use_large) kernel_name = "layer_norm_large_fp32";
+            else if (use_vectorized) kernel_name = "layer_norm_vec_fp32";
+            else kernel_name = "layer_norm_kernel";
         } else if (input.dtype() == MNDType::Float16) {
-            kernel_name = use_vectorized ? "layer_norm_vec_fp16" : "layer_norm_kernel_fp16";
+            if (use_large) kernel_name = "layer_norm_large_fp16";
+            else if (use_vectorized) kernel_name = "layer_norm_vec_fp16";
+            else kernel_name = "layer_norm_kernel_fp16";
         } else {
             MN_THROW(MetalNativeError::InvalidArgument,
                      "layer_norm: unsupported dtype (only Float32 and Float16)");
@@ -82,6 +76,8 @@ MNTensor layer_norm(const MNTensor& input,
         [encoder setBuffer:bias.buffer()->metal_buffer() offset:bias.offset() atIndex:2];
         [encoder setBuffer:output.buffer()->metal_buffer() offset:output.offset() atIndex:3];
 
+        MN_CHECK(batch_size <= UINT32_MAX, MetalNativeError::InvalidArgument, "normalization: dimension exceeds uint32_t range");
+        MN_CHECK(norm_size <= UINT32_MAX, MetalNativeError::InvalidArgument, "normalization: dimension exceeds uint32_t range");
         uint32_t batch_size_u32 = static_cast<uint32_t>(batch_size);
         uint32_t norm_size_u32 = static_cast<uint32_t>(norm_size);
 
@@ -89,26 +85,23 @@ MNTensor layer_norm(const MNTensor& input,
         [encoder setBytes:&norm_size_u32 length:sizeof(uint32_t) atIndex:5];
         [encoder setBytes:&eps length:sizeof(float) atIndex:6];
 
-        // Allocate threadgroup memory for vectorized kernels (caching input for 2nd pass)
-        if (use_vectorized) {
-            [encoder setThreadgroupMemoryLength:norm_size * sizeof(float) atIndex:0];
-        }
+        if (use_large) {
+            // Large kernels: 256 threads per threadgroup, one threadgroup per batch row.
+            // Threadgroup memory: 16 floats (8 for sum + 8 for sq_sum) for inter-SIMD reduction.
+            [encoder setThreadgroupMemoryLength:16 * sizeof(float) atIndex:0];
 
-        // PERFORMANCE NOTE: This kernel uses a fixed 32-thread SIMD-cooperative design.
-        // Each of the 32 threads processes norm_size/32 elements in a strided loop, then
-        // cooperatively reduces to compute mean/variance via simd_sum().
-        //
-        // This design is optimal for small/medium norm_size (< 2048) where the kernel is
-        // 1.5-2x faster than MPS. For large norm_size (>= 2048), this becomes a bottleneck:
-        // - 1x1024x4096: launches only 32 threads, each processing 128 elements
-        // - GPU occupancy: ~0.3% (32 threads on ~10,000 ALU M4 Max)
-        // - Result: 2.1x SLOWER than MPS (0.77ms custom vs 0.36ms MPS)
-        //
-        // The dispatch below is correct for the current kernel design. To fix the large-tensor
-        // regression, the kernel itself needs to be rewritten to use multiple threadgroups per batch.
-        MTLSize grid_size = MTLSizeMake(32, batch_size, 1);
-        MTLSize threadgroup_size = MTLSizeMake(32, 1, 1);
-        [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
+            MTLSize grid_size = MTLSizeMake(batch_size, 1, 1);
+            MTLSize threadgroup_size = MTLSizeMake(256, 1, 1);
+            [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:threadgroup_size];
+        } else {
+            // Small/medium kernels: 32 threads (1 SIMD group) per batch row.
+            if (use_vectorized) {
+                [encoder setThreadgroupMemoryLength:norm_size * sizeof(float) atIndex:0];
+            }
+            MTLSize grid_size = MTLSizeMake(32, batch_size, 1);
+            MTLSize threadgroup_size = MTLSizeMake(32, 1, 1);
+            [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
+        }
 
         [encoder endEncoding];
         // OPT-5: Use commit_and_continue to allow command buffer reuse.
@@ -142,17 +135,19 @@ MNTensor rms_norm(const MNTensor& input,
         MNDevice& device = MNDevice::instance();
         MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device);
 
-        // Determine kernel variant based on norm_size
-        // Use vectorized kernels for norm_size >= 128 (4x bandwidth improvement)
-        // Constraint: threadgroup memory limit is 32KB, so norm_size * sizeof(float) <= 32768
-        // This means norm_size <= 8192 for vectorized kernels
-        const bool use_vectorized = (norm_size >= 128 && norm_size <= 8192);
+        // Kernel selection: same strategy as layer_norm
+        const bool use_large = (norm_size >= 2048);
+        const bool use_vectorized = (!use_large && norm_size >= 128 && norm_size <= 8192);
 
         const char* kernel_name = nullptr;
         if (input.dtype() == MNDType::Float32) {
-            kernel_name = use_vectorized ? "rms_norm_vec_fp32" : "rms_norm_kernel";
+            if (use_large) kernel_name = "rms_norm_large_fp32";
+            else if (use_vectorized) kernel_name = "rms_norm_vec_fp32";
+            else kernel_name = "rms_norm_kernel";
         } else if (input.dtype() == MNDType::Float16) {
-            kernel_name = use_vectorized ? "rms_norm_vec_fp16" : "rms_norm_kernel_fp16";
+            if (use_large) kernel_name = "rms_norm_large_fp16";
+            else if (use_vectorized) kernel_name = "rms_norm_vec_fp16";
+            else kernel_name = "rms_norm_kernel_fp16";
         } else {
             MN_THROW(MetalNativeError::InvalidArgument,
                      "rms_norm: unsupported dtype (only Float32 and Float16)");
@@ -168,6 +163,8 @@ MNTensor rms_norm(const MNTensor& input,
         [encoder setBuffer:weight.buffer()->metal_buffer() offset:weight.offset() atIndex:1];
         [encoder setBuffer:output.buffer()->metal_buffer() offset:output.offset() atIndex:2];
 
+        MN_CHECK(batch_size <= UINT32_MAX, MetalNativeError::InvalidArgument, "normalization: dimension exceeds uint32_t range");
+        MN_CHECK(norm_size <= UINT32_MAX, MetalNativeError::InvalidArgument, "normalization: dimension exceeds uint32_t range");
         uint32_t batch_size_u32 = static_cast<uint32_t>(batch_size);
         uint32_t norm_size_u32 = static_cast<uint32_t>(norm_size);
 
@@ -175,14 +172,22 @@ MNTensor rms_norm(const MNTensor& input,
         [encoder setBytes:&norm_size_u32 length:sizeof(uint32_t) atIndex:4];
         [encoder setBytes:&eps length:sizeof(float) atIndex:5];
 
-        // Allocate threadgroup memory for vectorized kernels (caching input for 2nd pass)
-        if (use_vectorized) {
-            [encoder setThreadgroupMemoryLength:norm_size * sizeof(float) atIndex:0];
-        }
+        if (use_large) {
+            // Large kernels: 256 threads, one threadgroup per row.
+            // Threadgroup memory: 8 floats for inter-SIMD reduction (RMS only needs sq_sum).
+            [encoder setThreadgroupMemoryLength:8 * sizeof(float) atIndex:0];
 
-        MTLSize grid_size = MTLSizeMake(32, batch_size, 1);
-        MTLSize threadgroup_size = MTLSizeMake(32, 1, 1);
-        [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
+            MTLSize grid_size = MTLSizeMake(batch_size, 1, 1);
+            MTLSize threadgroup_size = MTLSizeMake(256, 1, 1);
+            [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:threadgroup_size];
+        } else {
+            if (use_vectorized) {
+                [encoder setThreadgroupMemoryLength:norm_size * sizeof(float) atIndex:0];
+            }
+            MTLSize grid_size = MTLSizeMake(32, batch_size, 1);
+            MTLSize threadgroup_size = MTLSizeMake(32, 1, 1);
+            [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
+        }
 
         [encoder endEncoding];
         // OPT-5: Use commit_and_continue to allow command buffer reuse.
@@ -245,6 +250,9 @@ MNTensor batch_norm(const MNTensor& input,
             [encoder setBuffer:weight.buffer()->metal_buffer() offset:weight.offset() atIndex:4];
             [encoder setBuffer:bias.buffer()->metal_buffer() offset:bias.offset() atIndex:5];
 
+            MN_CHECK(batch_size <= UINT32_MAX, MetalNativeError::InvalidArgument, "normalization: dimension exceeds uint32_t range");
+            MN_CHECK(channels <= UINT32_MAX, MetalNativeError::InvalidArgument, "normalization: dimension exceeds uint32_t range");
+            MN_CHECK(spatial_size <= UINT32_MAX, MetalNativeError::InvalidArgument, "normalization: dimension exceeds uint32_t range");
             uint32_t batch_size_u32 = static_cast<uint32_t>(batch_size);
             uint32_t channels_u32 = static_cast<uint32_t>(channels);
             uint32_t spatial_size_u32 = static_cast<uint32_t>(spatial_size);
@@ -272,6 +280,9 @@ MNTensor batch_norm(const MNTensor& input,
             [encoder setBuffer:weight.buffer()->metal_buffer() offset:weight.offset() atIndex:4];
             [encoder setBuffer:bias.buffer()->metal_buffer() offset:bias.offset() atIndex:5];
 
+            MN_CHECK(batch_size <= UINT32_MAX, MetalNativeError::InvalidArgument, "normalization: dimension exceeds uint32_t range");
+            MN_CHECK(channels <= UINT32_MAX, MetalNativeError::InvalidArgument, "normalization: dimension exceeds uint32_t range");
+            MN_CHECK(spatial_size <= UINT32_MAX, MetalNativeError::InvalidArgument, "normalization: dimension exceeds uint32_t range");
             uint32_t batch_size_u32 = static_cast<uint32_t>(batch_size);
             uint32_t channels_u32 = static_cast<uint32_t>(channels);
             uint32_t spatial_size_u32 = static_cast<uint32_t>(spatial_size);
@@ -349,6 +360,10 @@ MNTensor group_norm(const MNTensor& input,
         [encoder setBuffer:bias.buffer()->metal_buffer() offset:bias.offset() atIndex:2];
         [encoder setBuffer:output.buffer()->metal_buffer() offset:output.offset() atIndex:3];
 
+        MN_CHECK(batch_size <= UINT32_MAX, MetalNativeError::InvalidArgument, "normalization: dimension exceeds uint32_t range");
+        MN_CHECK(channels <= UINT32_MAX, MetalNativeError::InvalidArgument, "normalization: dimension exceeds uint32_t range");
+        MN_CHECK(spatial_size <= UINT32_MAX, MetalNativeError::InvalidArgument, "normalization: dimension exceeds uint32_t range");
+        MN_CHECK(num_groups <= UINT32_MAX, MetalNativeError::InvalidArgument, "normalization: dimension exceeds uint32_t range");
         uint32_t batch_size_u32 = static_cast<uint32_t>(batch_size);
         uint32_t channels_u32 = static_cast<uint32_t>(channels);
         uint32_t spatial_size_u32 = static_cast<uint32_t>(spatial_size);

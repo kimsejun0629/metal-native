@@ -16,6 +16,7 @@
 #include "metal_native/memory/budget_controller.h"
 #include "metal_native/dispatch/command_pipeline.h"
 
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
 #include <mach/mach_time.h>
@@ -63,7 +64,7 @@ static constexpr size_t kDefaultMaxCacheEntries = 64;
 
 std::mutex matmul_cache_mu;
 std::unordered_map<GraphCacheKey, MatmulCacheEntry> matmul_graph_cache;
-size_t matmul_cache_max_entries = kDefaultMaxCacheEntries;
+std::atomic<size_t> matmul_cache_max_entries{kDefaultMaxCacheEntries};
 
 // Evict oldest entry when cache is at capacity
 static void evict_lru_if_needed() {

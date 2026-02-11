@@ -30,17 +30,22 @@ int64_t normalize_dim(int64_t dim, size_t ndim) {
 // Compute size of dimensions before, at, and after the reduction dimension
 void compute_reduction_sizes(const MNShape& shape, int64_t dim,
                             uint32_t& outer_size, uint32_t& reduce_size, uint32_t& inner_size) {
-    outer_size = 1;
+    int64_t outer_size_64 = 1;
     for (int64_t i = 0; i < dim; ++i) {
-        outer_size *= static_cast<uint32_t>(shape[i]);
+        outer_size_64 *= shape[i];
     }
+    MN_CHECK(outer_size_64 <= UINT32_MAX, MetalNativeError::InvalidArgument, "softmax: dimension exceeds uint32_t range");
+    outer_size = static_cast<uint32_t>(outer_size_64);
 
+    MN_CHECK(shape[dim] <= UINT32_MAX, MetalNativeError::InvalidArgument, "softmax: dimension exceeds uint32_t range");
     reduce_size = static_cast<uint32_t>(shape[dim]);
 
-    inner_size = 1;
+    int64_t inner_size_64 = 1;
     for (size_t i = dim + 1; i < shape.ndim(); ++i) {
-        inner_size *= static_cast<uint32_t>(shape[static_cast<int64_t>(i)]);
+        inner_size_64 *= shape[static_cast<int64_t>(i)];
     }
+    MN_CHECK(inner_size_64 <= UINT32_MAX, MetalNativeError::InvalidArgument, "softmax: dimension exceeds uint32_t range");
+    inner_size = static_cast<uint32_t>(inner_size_64);
 }
 
 } // anonymous namespace

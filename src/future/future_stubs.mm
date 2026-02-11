@@ -112,11 +112,17 @@ MNTensor rms_norm(const MNTensor& input, const MNTensor& weight, float eps) {
     uint32_t norm_size = static_cast<uint32_t>(shape[shape.ndim() - 1]);
     uint32_t batch_size = static_cast<uint32_t>(input.numel() / norm_size);
 
+    const bool use_large = (norm_size >= 2048);
+
     @autoreleasepool {
         CommandPipeline& cmd_pipeline = device.command_pipeline();
 
-        const char* kernel_name = (input.dtype() == MNDType::Float32)
-            ? "fused_rms_norm_fp32" : "fused_rms_norm_fp16";
+        const char* kernel_name = nullptr;
+        if (input.dtype() == MNDType::Float32) {
+            kernel_name = use_large ? "fused_rms_norm_large_fp32" : "fused_rms_norm_fp32";
+        } else {
+            kernel_name = use_large ? "fused_rms_norm_large_fp16" : "fused_rms_norm_fp16";
+        }
 
         id<MTLComputePipelineState> pipeline =
             KernelRegistry::instance().get_pipeline(kernel_name);
@@ -131,10 +137,19 @@ MNTensor rms_norm(const MNTensor& input, const MNTensor& weight, float eps) {
         [encoder setBytes:&norm_size length:sizeof(uint32_t) atIndex:4];
         [encoder setBytes:&eps length:sizeof(float) atIndex:5];
 
-        MTLSize grid_size = MTLSizeMake(32, batch_size, 1);
-        MTLSize threadgroup_size = MTLSizeMake(32, 1, 1);
+        if (use_large) {
+            // 256 threads per threadgroup, one threadgroup per batch row.
+            [encoder setThreadgroupMemoryLength:8 * sizeof(float) atIndex:0];
 
-        [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
+            MTLSize grid_size = MTLSizeMake(batch_size, 1, 1);
+            MTLSize threadgroup_size = MTLSizeMake(256, 1, 1);
+            [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:threadgroup_size];
+        } else {
+            MTLSize grid_size = MTLSizeMake(32, batch_size, 1);
+            MTLSize threadgroup_size = MTLSizeMake(32, 1, 1);
+            [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
+        }
+
         [encoder endEncoding];
         cmd_pipeline.commit_and_continue();
     }
@@ -155,11 +170,17 @@ MNTensor layer_norm(const MNTensor& input, const MNTensor& weight,
     uint32_t norm_size = static_cast<uint32_t>(shape[shape.ndim() - 1]);
     uint32_t batch_size = static_cast<uint32_t>(input.numel() / norm_size);
 
+    const bool use_large = (norm_size >= 2048);
+
     @autoreleasepool {
         CommandPipeline& cmd_pipeline = device.command_pipeline();
 
-        const char* kernel_name = (input.dtype() == MNDType::Float32)
-            ? "fused_layer_norm_fp32" : "fused_layer_norm_fp16";
+        const char* kernel_name = nullptr;
+        if (input.dtype() == MNDType::Float32) {
+            kernel_name = use_large ? "fused_layer_norm_large_fp32" : "fused_layer_norm_fp32";
+        } else {
+            kernel_name = use_large ? "fused_layer_norm_large_fp16" : "fused_layer_norm_fp16";
+        }
 
         id<MTLComputePipelineState> pipeline =
             KernelRegistry::instance().get_pipeline(kernel_name);
@@ -175,13 +196,23 @@ MNTensor layer_norm(const MNTensor& input, const MNTensor& weight,
         [encoder setBytes:&norm_size length:sizeof(uint32_t) atIndex:5];
         [encoder setBytes:&eps length:sizeof(float) atIndex:6];
 
-        // Threadgroup memory for caching input during 2-pass normalization
-        [encoder setThreadgroupMemoryLength:norm_size * sizeof(float) atIndex:0];
+        if (use_large) {
+            // 256 threads per threadgroup, one threadgroup per batch row.
+            // 16 floats: 8 for sum + 8 for sq_sum inter-SIMD reduction.
+            [encoder setThreadgroupMemoryLength:16 * sizeof(float) atIndex:0];
 
-        MTLSize grid_size = MTLSizeMake(32, batch_size, 1);
-        MTLSize threadgroup_size = MTLSizeMake(32, 1, 1);
+            MTLSize grid_size = MTLSizeMake(batch_size, 1, 1);
+            MTLSize threadgroup_size = MTLSizeMake(256, 1, 1);
+            [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:threadgroup_size];
+        } else {
+            // Threadgroup memory for caching input during 2-pass normalization
+            [encoder setThreadgroupMemoryLength:norm_size * sizeof(float) atIndex:0];
 
-        [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
+            MTLSize grid_size = MTLSizeMake(32, batch_size, 1);
+            MTLSize threadgroup_size = MTLSizeMake(32, 1, 1);
+            [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
+        }
+
         [encoder endEncoding];
         cmd_pipeline.commit_and_continue();
     }
@@ -326,11 +357,17 @@ MNTensor fused_residual_norm(const MNTensor& input, const MNTensor& residual,
     MNDevice& device = MNDevice::instance();
     MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device);
 
+    const bool use_large = (norm_size >= 2048);
+
     @autoreleasepool {
         CommandPipeline& cmd_pipeline = device.command_pipeline();
 
-        const char* kernel_name = (input.dtype() == MNDType::Float32)
-            ? "fused_residual_rms_norm_fp32" : "fused_residual_rms_norm_fp16";
+        const char* kernel_name = nullptr;
+        if (input.dtype() == MNDType::Float32) {
+            kernel_name = use_large ? "fused_residual_rms_norm_large_fp32" : "fused_residual_rms_norm_fp32";
+        } else {
+            kernel_name = use_large ? "fused_residual_rms_norm_large_fp16" : "fused_residual_rms_norm_fp16";
+        }
 
         id<MTLComputePipelineState> pipeline =
             KernelRegistry::instance().get_pipeline(kernel_name);
@@ -346,10 +383,19 @@ MNTensor fused_residual_norm(const MNTensor& input, const MNTensor& residual,
         [encoder setBytes:&norm_size length:sizeof(uint32_t) atIndex:5];
         [encoder setBytes:&eps length:sizeof(float) atIndex:6];
 
-        MTLSize grid_size = MTLSizeMake(32, batch_size, 1);
-        MTLSize threadgroup_size = MTLSizeMake(32, 1, 1);
+        if (use_large) {
+            // 256 threads per threadgroup, one threadgroup per batch row.
+            [encoder setThreadgroupMemoryLength:8 * sizeof(float) atIndex:0];
 
-        [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
+            MTLSize grid_size = MTLSizeMake(batch_size, 1, 1);
+            MTLSize threadgroup_size = MTLSizeMake(256, 1, 1);
+            [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:threadgroup_size];
+        } else {
+            MTLSize grid_size = MTLSizeMake(32, batch_size, 1);
+            MTLSize threadgroup_size = MTLSizeMake(32, 1, 1);
+            [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
+        }
+
         [encoder endEncoding];
         cmd_pipeline.commit_and_continue();
     }

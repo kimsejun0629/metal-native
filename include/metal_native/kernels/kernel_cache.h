@@ -11,10 +11,6 @@
 #include <memory>
 #include <string>
 
-#ifdef __OBJC__
-#import <Metal/Metal.h>
-#endif
-
 namespace metal_native {
 
 class KernelCache {
@@ -32,18 +28,15 @@ public:
 
     // -- Lookup / insert -----------------------------------------------------
 
-#ifdef __OBJC__
-    /// Look up a cached pipeline state.  Returns nil if not found.
+    /// Look up a cached pipeline state.  Returns nullptr if not found.
     /// Promotes the entry to most-recently-used on hit.
-    id<MTLComputePipelineState> get(const std::string& key);
+    /// The returned pointer is an id<MTLComputePipelineState> in ObjC++ contexts.
+    void* get(const std::string& key);
 
     /// Insert a pipeline state.  If the cache is full, evicts the
     /// least-recently-used entry.
-    void put(const std::string& key, id<MTLComputePipelineState> pipeline);
-#else
-    void* get(const std::string& key);
-    void  put(const std::string& key, void* pipeline);
-#endif
+    /// @param pipeline  An id<MTLComputePipelineState> passed as void*.
+    void put(const std::string& key, void* pipeline);
 
     /// Remove all cached entries.
     void clear();

@@ -11,7 +11,9 @@
 #include "metal_native/core/error.h"
 #include "metal_native/graph/graph_cache.h"
 #include "metal_native/memory/budget_controller.h"
+#include "metal_native/dispatch/command_pipeline.h"
 
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
 #include <mach/mach_time.h>
@@ -58,7 +60,7 @@ static constexpr size_t kConvDefaultMaxCacheEntries = 64;
 
 std::mutex conv2d_cache_mu;
 std::unordered_map<GraphCacheKey, Conv2dCacheEntry> conv2d_graph_cache;
-size_t conv2d_cache_max_entries = kConvDefaultMaxCacheEntries;
+std::atomic<size_t> conv2d_cache_max_entries{kConvDefaultMaxCacheEntries};
 
 static void conv_evict_lru_if_needed() {
     if (conv2d_graph_cache.size() < conv2d_cache_max_entries) return;
@@ -262,11 +264,12 @@ MNTensor conv2d(const MNTensor& input,
         // Allocate output tensor
         MNTensor result = MNTensor::empty(output_shape, input.dtype(), device);
 
-
-        // Execute the graph
-        id<MTLCommandQueue> queue = device.command_queue();
-        MPSGraphExecutionDescriptor* exec_desc = [[MPSGraphExecutionDescriptor alloc] init];
-        exec_desc.waitUntilCompleted = NO;
+        // Create result tensor data backed by our output buffer so MPSGraph
+        // writes directly into it (zero-copy output).
+        MPSGraphTensorData* result_data = [[MPSGraphTensorData alloc]
+            initWithMTLBuffer:result.buffer()->metal_buffer()
+                       shape:to_ns_shape(output_shape)
+                    dataType:to_mps_datatype(input.dtype())];
 
         NSMutableDictionary* feeds = [NSMutableDictionary dictionaryWithDictionary:@{
             input_tensor: input_data,
@@ -281,15 +284,33 @@ MNTensor conv2d(const MNTensor& input,
             feeds[bias_tensor] = bias_data;
         }
 
-        NSDictionary* results = [graph runAsyncWithMTLCommandQueue:queue
-                                                             feeds:feeds
-                                                    targetTensors:@[result_tensor]
-                                                 targetOperations:nil
-                                                executionDescriptor:exec_desc];
+        NSDictionary* results_dict = @{
+            result_tensor: result_data
+        };
 
-        MN_CHECK(results != nil && results[result_tensor] != nil,
-                 MetalNativeError::InternalError,
-                 "conv2d: graph execution failed");
+        @try {
+            // Encode the graph asynchronously into the command pipeline's buffer.
+            // Using MPSCommandBuffer + resultsDictionary so MPSGraph writes
+            // directly into our pre-allocated output buffer (zero-copy).
+            CommandPipeline& cmd_pipeline = device.command_pipeline();
+            id<MTLCommandBuffer> cmd_buffer = cmd_pipeline.current_buffer();
+            MPSCommandBuffer* mps_cmd_buf =
+                [MPSCommandBuffer commandBufferWithCommandBuffer:cmd_buffer];
+
+            [graph encodeToCommandBuffer:mps_cmd_buf
+                                   feeds:feeds
+                        targetOperations:nil
+                       resultsDictionary:results_dict
+                     executionDescriptor:nil];
+
+            // MPSCommandBuffer may internally commit the underlying buffer,
+            // so always flush here regardless of lazy commit mode.
+            cmd_pipeline.flush();
+        } @catch (NSException* exception) {
+            MN_THROW(MetalNativeError::InternalError,
+                     "conv2d: MPSGraph execution failed: " +
+                     std::string([[exception reason] UTF8String]));
+        }
 
         return result;
     }

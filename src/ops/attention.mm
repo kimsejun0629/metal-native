@@ -135,6 +135,11 @@ MNTensor flash_attention(const MNTensor& query,
         [encoder setBuffer:output.buffer()->metal_buffer() offset:output.offset() atIndex:4];
 
         // Set parameters
+        MN_CHECK(batch <= UINT32_MAX, MetalNativeError::InvalidArgument, "attention: dimension exceeds uint32_t range");
+        MN_CHECK(num_heads <= UINT32_MAX, MetalNativeError::InvalidArgument, "attention: dimension exceeds uint32_t range");
+        MN_CHECK(seq_len_q <= UINT32_MAX, MetalNativeError::InvalidArgument, "attention: dimension exceeds uint32_t range");
+        MN_CHECK(seq_len_k <= UINT32_MAX, MetalNativeError::InvalidArgument, "attention: dimension exceeds uint32_t range");
+        MN_CHECK(head_dim <= UINT32_MAX, MetalNativeError::InvalidArgument, "attention: dimension exceeds uint32_t range");
         uint32_t batch_u32 = static_cast<uint32_t>(batch);
         uint32_t num_heads_u32 = static_cast<uint32_t>(num_heads);
         uint32_t seq_len_q_u32 = static_cast<uint32_t>(seq_len_q);
