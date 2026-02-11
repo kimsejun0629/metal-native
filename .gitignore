@@ -1,0 +1,73 @@
+# Build artifacts
+build/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dylib
+*.metallib
+*.air
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+*.egg
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+.project
+.cproject
+
+# macOS
+.DS_Store
+._*
+
+# OMC / Claude state
+.omc/
+.cache/
+
+# CMake Testing directory
+Testing/
+
+# Old benchmark charts (replaced by docs/images/)
+benchmark_charts/
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+*.gcov
+*.gcda
+*.gcno
+
+# Documentation
+docs/_build/
+site/
+
+# Environment
+.env
+.venv/
+env/
+venv/
+
+# Profiling output
+*.gputrace
+*.trace
+
+# Security-sensitive files
+*.key
+*.pem
+*.p12
+*.cert
+*.crt
+credentials.json
+.env.*
+!.env.example
+secrets/

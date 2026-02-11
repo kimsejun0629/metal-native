@@ -1,0 +1,11 @@
+#pragma once
+
+/// @file version.h
+/// @brief Version information for metal_native, configured by CMake.
+
+#define METAL_NATIVE_VERSION_MAJOR @metal_native_VERSION_MAJOR@
+#define METAL_NATIVE_VERSION_MINOR @metal_native_VERSION_MINOR@
+#define METAL_NATIVE_VERSION_PATCH @metal_native_VERSION_PATCH@
+
+#define METAL_NATIVE_VERSION_STRING \
+    "@metal_native_VERSION_MAJOR@.@metal_native_VERSION_MINOR@.@metal_native_VERSION_PATCH@"

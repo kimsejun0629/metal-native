@@ -1,0 +1,96 @@
+{
+  "benchmark": "Real Model Inference",
+  "system": "Apple M4 Max 36GB",
+  "pytorch": "2.8.0",
+  "results": [
+    {
+      "model": "GPT-2 (124M)",
+      "model_id": "gpt2",
+      "params_M": 124.439808,
+      "model_size_mb": 474.7001953125,
+      "dtype": "torch.float32",
+      "config": {
+        "n_layer": 12,
+        "n_head": 12,
+        "n_embd": 768
+      },
+      "cpu_forward_ms": 13.583791999998596,
+      "mps_forward_short_ms": 6.568473625000681,
+      "mps_forward_medium_ms": 6.99794787500041,
+      "mps_forward_long_ms": 10.491119875000177,
+      "cpu_gen_50_ms": 361.09991650000063,
+      "cpu_gen_50_tok_s": 138.4658309662055,
+      "mps_gen_50_ms": 606.1477083333363,
+      "mps_gen_50_tok_s": 82.48814490692376,
+      "mps_gen_100_ms": 1208.7888333333344,
+      "mps_gen_100_tok_s": 82.72743529921746,
+      "forward_speedup_vs_cpu": 2.0680287043090906,
+      "gpu_memory_mb": 486.703125,
+      "sample_output": " uncertain.\n\n\"We're not sure what the future will look like,\" said Dr. Michael S. Schoenfeld, a prof"
+    },
+    {
+      "model": "GPT-2 Medium (355M)",
+      "model_id": "gpt2-medium",
+      "params_M": 354.823168,
+      "model_size_mb": 1353.54296875,
+      "dtype": "torch.float32",
+      "config": {
+        "n_layer": 24,
+        "n_head": 16,
+        "n_embd": 1024
+      },
+      "cpu_forward_ms": 56.13554200000692,
+      "mps_forward_short_ms": 9.813421750003215,
+      "mps_forward_medium_ms": 10.71036437499906,
+      "mps_forward_long_ms": 23.46169262499842,
+      "cpu_gen_50_ms": 915.5205415000012,
+      "cpu_gen_50_tok_s": 54.61373910636601,
+      "mps_gen_50_ms": 763.359583000001,
+      "mps_gen_50_tok_s": 65.49993098075764,
+      "mps_gen_100_ms": 1497.5192636666652,
+      "mps_gen_100_tok_s": 66.77710425918042,
+      "forward_speedup_vs_cpu": 5.720282224697876,
+      "gpu_memory_mb": 1377.548828125,
+      "sample_output": " in the hands of the people.\n\nThe future of artificial intelligence is in the hands of the people.\n\n"
+    },
+    {
+      "model": "GPT-2 Large (774M)",
+      "model_id": "gpt2-large",
+      "params_M": 774.03008,
+      "model_size_mb": 2952.6904296875,
+      "dtype": "torch.float32",
+      "config": {
+        "n_layer": 36,
+        "n_head": 20,
+        "n_embd": 1280
+      },
+      "cpu_forward_ms": 106.90470800000185,
+      "mps_forward_short_ms": 15.14036462499746,
+      "mps_forward_medium_ms": 16.868895750000945,
+      "mps_forward_long_ms": 45.732755125001745,
+      "cpu_gen_50_ms": 1615.7104790000005,
+      "cpu_gen_50_tok_s": 30.94613833967712,
+      "mps_gen_50_ms": 904.6038333333399,
+      "mps_gen_50_tok_s": 55.272814637272674,
+      "mps_gen_100_ms": 1814.9524863333397,
+      "mps_gen_100_tok_s": 55.0978611027031,
+      "forward_speedup_vs_cpu": 7.060907094898964,
+      "gpu_memory_mb": 2988.69921875,
+      "sample_output": " in the hands of the people who build it.\n\nThe future of artificial intelligence is in the hands of "
+    },
+    {
+      "model": "GPT-2 XL (1.5B)",
+      "params_M": 1557.6112,
+      "model_size_mb": 2970.9075927734375,
+      "cpu_forward_ms": null,
+      "mps_forward_short_ms": 19.763680666680255,
+      "mps_forward_medium_ms": 24.040721999957288,
+      "mps_forward_long_ms": 77.43284766665208,
+      "mps_gen_50_tok_s": 54.211341844965,
+      "mps_gen_100_tok_s": 54.32075837780105,
+      "forward_speedup_vs_cpu": null,
+      "gpu_memory_mb": 3018.960693359375,
+      "mps_gen_200_tok_s": 53.028198473675246
+    }
+  ]
+}

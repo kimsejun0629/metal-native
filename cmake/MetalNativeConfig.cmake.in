@@ -1,0 +1,19 @@
+# MetalNativeConfig.cmake.in
+# Package configuration file for MetalNative
+
+@PACKAGE_INIT@
+
+# Include CMake modules
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+
+# Find required frameworks
+include(CMakeFindDependencyMacro)
+find_dependency(Metal REQUIRED)
+find_dependency(MPS REQUIRED)
+find_dependency(MPSGraph REQUIRED)
+find_dependency(Accelerate REQUIRED)
+
+# Include targets file
+include("${CMAKE_CURRENT_LIST_DIR}/MetalNativeTargets.cmake")
+
+check_required_components(MetalNative)
