@@ -62,27 +62,55 @@ MNTensor softmax(const MNTensor& input, int64_t dim) {
         uint32_t outer_size, reduce_size, inner_size;
         compute_reduction_sizes(input.shape(), dim, outer_size, reduce_size, inner_size);
 
-        // Select kernel based on dtype and reduce_size
+        // Select kernel based on dtype, reduce_size, and contiguity
         const char* kernel_name = nullptr;
-        if (reduce_size >= 32) {
-            // Use SIMD-cooperative kernel for large reductions
-            if (input.dtype() == MNDType::Float32) {
-                kernel_name = "softmax_simd_cooperative_fp32";
-            } else if (input.dtype() == MNDType::Float16) {
-                kernel_name = "softmax_simd_cooperative_fp16";
+        bool use_vec4 = (inner_size == 1 && reduce_size % 4 == 0);
+
+        if (use_vec4) {
+            // Use vectorized kernel for contiguous case
+            if (reduce_size >= 128) {
+                // Use SIMD-cooperative vec4 kernel for large reductions
+                if (input.dtype() == MNDType::Float32) {
+                    kernel_name = "softmax_simd_cooperative_vec4_fp32";
+                } else if (input.dtype() == MNDType::Float16) {
+                    kernel_name = "softmax_simd_cooperative_vec4_fp16";
+                } else {
+                    MN_THROW(MetalNativeError::InvalidArgument,
+                             "softmax: unsupported dtype (only Float32 and Float16)");
+                }
             } else {
-                MN_THROW(MetalNativeError::InvalidArgument,
-                         "softmax: unsupported dtype (only Float32 and Float16)");
+                // Use online vec4 kernel for smaller reductions
+                if (input.dtype() == MNDType::Float32) {
+                    kernel_name = "softmax_online_vec4_fp32";
+                } else if (input.dtype() == MNDType::Float16) {
+                    kernel_name = "softmax_online_vec4_fp16";
+                } else {
+                    MN_THROW(MetalNativeError::InvalidArgument,
+                             "softmax: unsupported dtype (only Float32 and Float16)");
+                }
             }
         } else {
-            // Fallback to existing online kernel for small reduce sizes
-            if (input.dtype() == MNDType::Float32) {
-                kernel_name = "softmax_online_fp32";
-            } else if (input.dtype() == MNDType::Float16) {
-                kernel_name = "softmax_online_fp16";
+            // Use scalar kernels for non-contiguous case
+            if (reduce_size >= 32) {
+                // Use SIMD-cooperative kernel for large reductions
+                if (input.dtype() == MNDType::Float32) {
+                    kernel_name = "softmax_simd_cooperative_fp32";
+                } else if (input.dtype() == MNDType::Float16) {
+                    kernel_name = "softmax_simd_cooperative_fp16";
+                } else {
+                    MN_THROW(MetalNativeError::InvalidArgument,
+                             "softmax: unsupported dtype (only Float32 and Float16)");
+                }
             } else {
-                MN_THROW(MetalNativeError::InvalidArgument,
-                         "softmax: unsupported dtype (only Float32 and Float16)");
+                // Fallback to existing online kernel for small reduce sizes
+                if (input.dtype() == MNDType::Float32) {
+                    kernel_name = "softmax_online_fp32";
+                } else if (input.dtype() == MNDType::Float16) {
+                    kernel_name = "softmax_online_fp16";
+                } else {
+                    MN_THROW(MetalNativeError::InvalidArgument,
+                             "softmax: unsupported dtype (only Float32 and Float16)");
+                }
             }
         }
 
@@ -101,8 +129,17 @@ MNTensor softmax(const MNTensor& input, int64_t dim) {
             [encoder setBytes:&reduce_size length:sizeof(uint32_t) atIndex:3];
             [encoder setBytes:&inner_size length:sizeof(uint32_t) atIndex:4];
 
-            MTLSize grid_size = MTLSizeMake(inner_size, outer_size, 1);
-            MTLSize threadgroup_size = MTLSizeMake(32, 1, 1);
+            MTLSize grid_size;
+            MTLSize threadgroup_size;
+            if (use_vec4) {
+                // Vec4 kernels use 1D dispatch with outer_size threads
+                grid_size = MTLSizeMake(outer_size, 1, 1);
+                threadgroup_size = MTLSizeMake(32, 1, 1);
+            } else {
+                // Scalar kernels use 2D dispatch
+                grid_size = MTLSizeMake(inner_size, outer_size, 1);
+                threadgroup_size = MTLSizeMake(32, 1, 1);
+            }
             [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
             [encoder endEncoding];
         }

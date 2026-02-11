@@ -303,9 +303,10 @@ MNTensor conv2d(const MNTensor& input,
                        resultsDictionary:results_dict
                      executionDescriptor:nil];
 
-            // MPSCommandBuffer may internally commit the underlying buffer,
-            // so always flush here regardless of lazy commit mode.
-            cmd_pipeline.flush();
+            // MPSGraph's encodeToCommandBuffer only encodes GPU commands; it does
+            // NOT commit the underlying MTLCommandBuffer. Safe to use the normal
+            // commit path, which respects lazy-commit batching.
+            cmd_pipeline.commit_and_continue();
         } @catch (NSException* exception) {
             MN_THROW(MetalNativeError::InternalError,
                      "conv2d: MPSGraph execution failed: " +

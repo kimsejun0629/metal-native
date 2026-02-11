@@ -24,8 +24,8 @@ kernel void fused_swiglu_fp32(
 
     if (idx + 3 < num_elements) {
         // Full vector path: process 4 elements at once
-        float4 g = float4(gate[idx], gate[idx+1], gate[idx+2], gate[idx+3]);
-        float4 u = float4(up[idx], up[idx+1], up[idx+2], up[idx+3]);
+        float4 g = *reinterpret_cast<device const float4*>(gate + idx);
+        float4 u = *reinterpret_cast<device const float4*>(up + idx);
 
         // Compute SiLU(gate): g / (1 + exp(-g))
         float4 silu_g = g / (1.0f + exp(-g));
@@ -34,10 +34,7 @@ kernel void fused_swiglu_fp32(
         float4 result = silu_g * u;
 
         // Write results back
-        output[idx] = result.x;
-        output[idx+1] = result.y;
-        output[idx+2] = result.z;
-        output[idx+3] = result.w;
+        *reinterpret_cast<device float4*>(output + idx) = result;
     } else {
         // Tail handling: process remaining elements individually
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
@@ -60,8 +57,8 @@ kernel void fused_swiglu_fp16(
 
     if (idx + 3 < num_elements) {
         // Full vector path: process 4 elements at once
-        half4 g_h = half4(gate[idx], gate[idx+1], gate[idx+2], gate[idx+3]);
-        half4 u_h = half4(up[idx], up[idx+1], up[idx+2], up[idx+3]);
+        half4 g_h = *reinterpret_cast<device const half4*>(gate + idx);
+        half4 u_h = *reinterpret_cast<device const half4*>(up + idx);
 
         // Promote to FP32 for numerical stability during computation
         float4 g = float4(g_h);
@@ -75,10 +72,7 @@ kernel void fused_swiglu_fp16(
 
         // Convert back to FP16 and write results
         half4 result_h = half4(result);
-        output[idx] = result_h.x;
-        output[idx+1] = result_h.y;
-        output[idx+2] = result_h.z;
-        output[idx+3] = result_h.w;
+        *reinterpret_cast<device half4*>(output + idx) = result_h;
     } else {
         // Tail handling: process remaining elements individually
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {

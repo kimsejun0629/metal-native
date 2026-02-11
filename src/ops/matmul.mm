@@ -47,6 +47,39 @@ NSArray<NSNumber*>* to_ns_shape(const MNShape& shape) {
     return ns_shape;
 }
 
+// Cached version of to_ns_shape to avoid repeated NSArray allocations
+static NSArray<NSNumber*>* cached_ns_shape(const MNShape& shape) {
+    // Use thread_local to avoid locking
+    thread_local std::unordered_map<uint64_t, NSArray<NSNumber*>*> shape_cache;
+
+    // Simple hash of shape dims
+    uint64_t hash = shape.ndim();
+    for (size_t i = 0; i < shape.ndim(); ++i) {
+        hash = hash * 31 + static_cast<uint64_t>(shape[static_cast<int64_t>(i)]);
+    }
+
+    auto it = shape_cache.find(hash);
+    if (it != shape_cache.end()) {
+        return it->second;
+    }
+
+    // Cache miss - create and store
+    NSArray<NSNumber*>* ns_shape = to_ns_shape(shape);
+    // Limit cache size
+    if (shape_cache.size() > 64) shape_cache.clear();
+    shape_cache[hash] = ns_shape;
+    return ns_shape;
+}
+
+// Cache for MPSGraphTensorData to avoid repeated allocations
+struct TensorDataCache {
+    uint64_t shape_hash = 0;
+    MPSDataType dtype = MPSDataTypeFloat32;
+    id<MTLBuffer> buffer = nil;
+    MPSGraphTensorData* data = nil;
+};
+thread_local TensorDataCache td_cache_a, td_cache_b, td_cache_result;
+
 // Cache entry for matmul graphs
 struct MatmulCacheEntry {
     MPSGraph* graph;
@@ -288,16 +321,49 @@ MNTensor matmul(const MNTensor& a,
             matmul_graph_cache[cache_key] = entry;
         }
 
-        // Create MPSGraphTensorData for inputs
-        MPSGraphTensorData* a_data = [[MPSGraphTensorData alloc]
-            initWithMTLBuffer:a.buffer()->metal_buffer()
-                       shape:to_ns_shape(a.shape())
-                    dataType:to_mps_datatype(a.dtype())];
+        // Create MPSGraphTensorData for inputs (with caching)
+        MPSDataType mps_dtype = to_mps_datatype(a.dtype());
+        uint64_t a_hash = a.shape().ndim();
+        for (size_t i = 0; i < a.shape().ndim(); ++i) {
+            a_hash = a_hash * 31 + static_cast<uint64_t>(a.shape()[static_cast<int64_t>(i)]);
+        }
 
-        MPSGraphTensorData* b_data = [[MPSGraphTensorData alloc]
-            initWithMTLBuffer:b.buffer()->metal_buffer()
-                       shape:to_ns_shape(b.shape())
-                    dataType:to_mps_datatype(b.dtype())];
+        MPSGraphTensorData* a_data;
+        if (td_cache_a.buffer == a.buffer()->metal_buffer() &&
+            td_cache_a.shape_hash == a_hash &&
+            td_cache_a.dtype == mps_dtype) {
+            a_data = td_cache_a.data;
+        } else {
+            a_data = [[MPSGraphTensorData alloc]
+                initWithMTLBuffer:a.buffer()->metal_buffer()
+                           shape:cached_ns_shape(a.shape())
+                        dataType:mps_dtype];
+            td_cache_a.buffer = a.buffer()->metal_buffer();
+            td_cache_a.shape_hash = a_hash;
+            td_cache_a.dtype = mps_dtype;
+            td_cache_a.data = a_data;
+        }
+
+        uint64_t b_hash = b.shape().ndim();
+        for (size_t i = 0; i < b.shape().ndim(); ++i) {
+            b_hash = b_hash * 31 + static_cast<uint64_t>(b.shape()[static_cast<int64_t>(i)]);
+        }
+
+        MPSGraphTensorData* b_data;
+        if (td_cache_b.buffer == b.buffer()->metal_buffer() &&
+            td_cache_b.shape_hash == b_hash &&
+            td_cache_b.dtype == mps_dtype) {
+            b_data = td_cache_b.data;
+        } else {
+            b_data = [[MPSGraphTensorData alloc]
+                initWithMTLBuffer:b.buffer()->metal_buffer()
+                           shape:cached_ns_shape(b.shape())
+                        dataType:mps_dtype];
+            td_cache_b.buffer = b.buffer()->metal_buffer();
+            td_cache_b.shape_hash = b_hash;
+            td_cache_b.dtype = mps_dtype;
+            td_cache_b.data = b_data;
+        }
 
         // Determine output shape
         std::vector<int64_t> output_dims;
@@ -313,10 +379,26 @@ MNTensor matmul(const MNTensor& a,
 
         // Create result tensor data backed by our output buffer so MPSGraph
         // writes directly into it (zero-copy output).
-        MPSGraphTensorData* result_data = [[MPSGraphTensorData alloc]
-            initWithMTLBuffer:result.buffer()->metal_buffer()
-                       shape:to_ns_shape(output_shape)
-                    dataType:to_mps_datatype(a.dtype())];
+        uint64_t result_hash = output_shape.ndim();
+        for (size_t i = 0; i < output_shape.ndim(); ++i) {
+            result_hash = result_hash * 31 + static_cast<uint64_t>(output_shape[static_cast<int64_t>(i)]);
+        }
+
+        MPSGraphTensorData* result_data;
+        if (td_cache_result.buffer == result.buffer()->metal_buffer() &&
+            td_cache_result.shape_hash == result_hash &&
+            td_cache_result.dtype == mps_dtype) {
+            result_data = td_cache_result.data;
+        } else {
+            result_data = [[MPSGraphTensorData alloc]
+                initWithMTLBuffer:result.buffer()->metal_buffer()
+                           shape:cached_ns_shape(output_shape)
+                        dataType:mps_dtype];
+            td_cache_result.buffer = result.buffer()->metal_buffer();
+            td_cache_result.shape_hash = result_hash;
+            td_cache_result.dtype = mps_dtype;
+            td_cache_result.data = result_data;
+        }
 
         NSDictionary* feeds = @{
             a_tensor: a_data,
@@ -341,9 +423,10 @@ MNTensor matmul(const MNTensor& a,
                        resultsDictionary:results_dict
                      executionDescriptor:nil];
 
-            // MPSCommandBuffer may internally commit the underlying buffer,
-            // so always flush here regardless of lazy commit mode.
-            cmd_pipeline.flush();
+            // MPSGraph's encodeToCommandBuffer only encodes GPU commands; it does
+            // NOT commit the underlying MTLCommandBuffer. Safe to use the normal
+            // commit path, which respects lazy-commit batching.
+            cmd_pipeline.commit_and_continue();
         } @catch (NSException* exception) {
             MN_THROW(MetalNativeError::InternalError,
                      "matmul: MPSGraph execution failed: " +

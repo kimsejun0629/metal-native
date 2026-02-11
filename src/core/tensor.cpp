@@ -53,7 +53,10 @@ MNTensor MNTensor::empty(const MNShape& shape, MNDType dtype,
     // Ensure at least 1 byte allocation (Metal does not allow zero-length buffers).
     const size_t alloc = std::max(nbytes, size_t{1});
 
-    auto buf = std::make_shared<MNBuffer>(device, alloc, mode);
+    // Use the pooled allocator for buffer reuse.  This avoids creating a
+    // fresh MTLBuffer on every tensor allocation and instead returns a
+    // cached block from the MetalSmartAllocator free-list when possible.
+    auto buf = MNBuffer::allocate_pooled(device, alloc, mode);
     auto strides = shape.contiguous_strides();
     return MNTensor(std::move(buf), shape, std::move(strides), dtype);
 }
@@ -189,7 +192,7 @@ MNTensor MNTensor::clone() const {
 
     // Obtain device from the buffer -- we re-use MNDevice::instance() since
     // there is only one device on Apple Silicon.
-    auto new_buf = std::make_shared<MNBuffer>(
+    auto new_buf = MNBuffer::allocate_pooled(
         MNDevice::instance(), alloc, StorageMode::Shared);
 
     if (is_contiguous()) {

@@ -8,6 +8,7 @@
 #include "metal_native/core/error.h"
 #include "metal_native/dispatch/command_pipeline.h"
 #include "metal_native/graph/graph_cache.h"
+#include "metal_native/memory/allocator.h"
 
 #include <mutex>
 #include <string>
@@ -28,6 +29,7 @@ struct MNDevice::Impl {
     bool                bf16_support = false;
     std::unique_ptr<CommandPipeline> cmd_pipeline;
     std::unique_ptr<GraphCache>     graph_cache_inst;
+    std::unique_ptr<MetalSmartAllocator> allocator_inst;
 };
 
 // ---------------------------------------------------------------------------
@@ -76,6 +78,7 @@ MNDevice::MNDevice() : impl_(std::make_unique<Impl>()) {
         impl_->cmd_pipeline = std::make_unique<CommandPipeline>(*this, 3);
         impl_->graph_cache_inst = std::make_unique<GraphCache>(128);
         impl_->graph_cache_inst->start_eviction_timer(30);
+        impl_->allocator_inst = std::make_unique<MetalSmartAllocator>(*this);
     }
 }
 
@@ -143,6 +146,10 @@ CommandPipeline& MNDevice::command_pipeline() {
 
 GraphCache& MNDevice::graph_cache() {
     return *impl_->graph_cache_inst;
+}
+
+MetalSmartAllocator& MNDevice::allocator() {
+    return *impl_->allocator_inst;
 }
 
 } // namespace metal_native

@@ -24,6 +24,7 @@ namespace metal_native {
 
 class CommandPipeline;
 class GraphCache;
+class MetalSmartAllocator;
 
 class MNDevice {
 public:
@@ -81,6 +82,9 @@ public:
 
     /// Shared GraphCache for compiled MPSGraphExecutable objects.
     GraphCache& graph_cache();
+
+    /// Shared MetalSmartAllocator for pooled buffer allocation.
+    MetalSmartAllocator& allocator();
 
     // -- Non-copyable / non-movable ------------------------------------------
     MNDevice(const MNDevice&) = delete;

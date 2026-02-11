@@ -90,6 +90,17 @@ public:
     static std::unique_ptr<MNBuffer> create_zero_copy(
         MNDevice& device, void* cpu_ptr, size_t size);
 
+    /// Allocate a buffer from the device's MetalSmartAllocator pool.
+    /// The buffer is returned to the pool when the shared_ptr's reference
+    /// count reaches zero, enabling buffer reuse without re-allocation.
+    ///
+    /// @param device  The MNDevice (provides the allocator).
+    /// @param size    Allocation size in bytes (must be > 0).
+    /// @param mode    Storage mode (default: Shared).
+    /// @return Shared pointer to a pooled MNBuffer.
+    static std::shared_ptr<MNBuffer> allocate_pooled(
+        MNDevice& device, size_t size, StorageMode mode = StorageMode::Shared);
+
     /// Wrap an externally-owned pointer as an MNBuffer (zero-copy).
     /// The caller is responsible for keeping the external memory alive.
     /// @param device  The Metal device.

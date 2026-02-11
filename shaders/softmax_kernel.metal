@@ -434,3 +434,167 @@ kernel void log_softmax_online_fp16(
         output[base + i * stride] = half(float(input[base + i * stride]) - max_val - log_sum);
     }
 }
+
+// Vectorized softmax kernels for contiguous case (inner_size == 1)
+// Each thread processes reduce_size/4 float4 elements with stride=1
+
+kernel void softmax_online_vec4_fp32(
+    device const float* input     [[buffer(0)]],
+    device float* output          [[buffer(1)]],
+    constant uint& outer_size     [[buffer(2)]],
+    constant uint& reduce_size    [[buffer(3)]],  // must be multiple of 4
+    constant uint& inner_size     [[buffer(4)]],  // must be 1
+    uint gid                      [[thread_position_in_grid]]
+) {
+    if (gid >= outer_size) return;
+
+    const uint base = gid * reduce_size;
+    const uint vec_count = reduce_size / 4;
+    device const float4* in4 = reinterpret_cast<device const float4*>(input + base);
+    device float4* out4 = reinterpret_cast<device float4*>(output + base);
+
+    // Pass 1: find max
+    float4 max4 = float4(-INFINITY);
+    for (uint i = 0; i < vec_count; i++) {
+        max4 = max(max4, in4[i]);
+    }
+    float max_val = max(max(max4.x, max4.y), max(max4.z, max4.w));
+
+    // Pass 2: exp and sum
+    float sum_exp = 0.0f;
+    for (uint i = 0; i < vec_count; i++) {
+        float4 e = exp(in4[i] - float4(max_val));
+        sum_exp += e.x + e.y + e.z + e.w;
+    }
+
+    // Pass 3: normalize
+    float inv_sum = 1.0f / sum_exp;
+    for (uint i = 0; i < vec_count; i++) {
+        out4[i] = exp(in4[i] - float4(max_val)) * inv_sum;
+    }
+}
+
+kernel void softmax_online_vec4_fp16(
+    device const half* input      [[buffer(0)]],
+    device half* output           [[buffer(1)]],
+    constant uint& outer_size     [[buffer(2)]],
+    constant uint& reduce_size    [[buffer(3)]],  // must be multiple of 4
+    constant uint& inner_size     [[buffer(4)]],  // must be 1
+    uint gid                      [[thread_position_in_grid]]
+) {
+    if (gid >= outer_size) return;
+
+    const uint base = gid * reduce_size;
+    const uint vec_count = reduce_size / 4;
+    device const half4* in4 = reinterpret_cast<device const half4*>(input + base);
+    device half4* out4 = reinterpret_cast<device half4*>(output + base);
+
+    // Pass 1: find max (accumulate in float for stability)
+    float4 max4 = float4(-INFINITY);
+    for (uint i = 0; i < vec_count; i++) {
+        float4 v = float4(in4[i]);
+        max4 = max(max4, v);
+    }
+    float max_val = max(max(max4.x, max4.y), max(max4.z, max4.w));
+
+    // Pass 2: exp and sum (accumulate in float)
+    float sum_exp = 0.0f;
+    for (uint i = 0; i < vec_count; i++) {
+        float4 v = float4(in4[i]);
+        float4 e = exp(v - float4(max_val));
+        sum_exp += e.x + e.y + e.z + e.w;
+    }
+
+    // Pass 3: normalize
+    float inv_sum = 1.0f / sum_exp;
+    for (uint i = 0; i < vec_count; i++) {
+        float4 v = float4(in4[i]);
+        float4 result = exp(v - float4(max_val)) * inv_sum;
+        out4[i] = half4(result);
+    }
+}
+
+kernel void softmax_simd_cooperative_vec4_fp32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& outer_size [[buffer(2)]],
+    constant uint& reduce_size [[buffer(3)]],  // must be multiple of 4
+    constant uint& inner_size [[buffer(4)]],  // must be 1
+    uint gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    if (gid >= outer_size) return;
+
+    const uint base = gid * reduce_size;
+    const uint vec_count = reduce_size / 4;
+    device const float4* in4 = reinterpret_cast<device const float4*>(input + base);
+    device float4* out4 = reinterpret_cast<device float4*>(output + base);
+
+    // Pass 1: Find max using SIMD cooperative reduction
+    float thread_max = -INFINITY;
+    for (uint i = lane; i < vec_count; i += 32) {
+        float4 v = in4[i];
+        float local_max = max(max(v.x, v.y), max(v.z, v.w));
+        thread_max = max(thread_max, local_max);
+    }
+    float row_max = simd_max(thread_max);
+
+    // Pass 2: Compute sum of exp(x - max)
+    float thread_sum = 0.0f;
+    for (uint i = lane; i < vec_count; i += 32) {
+        float4 v = in4[i];
+        float4 e = exp(v - float4(row_max));
+        thread_sum += e.x + e.y + e.z + e.w;
+    }
+    float row_sum = simd_sum(thread_sum);
+
+    // Pass 3: Normalize and write output
+    float inv_sum = 1.0f / row_sum;
+    for (uint i = lane; i < vec_count; i += 32) {
+        float4 v = in4[i];
+        out4[i] = exp(v - float4(row_max)) * inv_sum;
+    }
+}
+
+kernel void softmax_simd_cooperative_vec4_fp16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& outer_size [[buffer(2)]],
+    constant uint& reduce_size [[buffer(3)]],  // must be multiple of 4
+    constant uint& inner_size [[buffer(4)]],  // must be 1
+    uint gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    if (gid >= outer_size) return;
+
+    const uint base = gid * reduce_size;
+    const uint vec_count = reduce_size / 4;
+    device const half4* in4 = reinterpret_cast<device const half4*>(input + base);
+    device half4* out4 = reinterpret_cast<device half4*>(output + base);
+
+    // Pass 1: Find max using SIMD cooperative reduction (FP32 accumulation)
+    float thread_max = -INFINITY;
+    for (uint i = lane; i < vec_count; i += 32) {
+        float4 v = float4(in4[i]);
+        float local_max = max(max(v.x, v.y), max(v.z, v.w));
+        thread_max = max(thread_max, local_max);
+    }
+    float row_max = simd_max(thread_max);
+
+    // Pass 2: Compute sum of exp(x - max) (FP32 accumulation)
+    float thread_sum = 0.0f;
+    for (uint i = lane; i < vec_count; i += 32) {
+        float4 v = float4(in4[i]);
+        float4 e = exp(v - float4(row_max));
+        thread_sum += e.x + e.y + e.z + e.w;
+    }
+    float row_sum = simd_sum(thread_sum);
+
+    // Pass 3: Normalize and write output
+    float inv_sum = 1.0f / row_sum;
+    for (uint i = lane; i < vec_count; i += 32) {
+        float4 v = float4(in4[i]);
+        float4 result = exp(v - float4(row_max)) * inv_sum;
+        out4[i] = half4(result);
+    }
+}

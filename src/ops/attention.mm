@@ -209,4 +209,135 @@ MNTensor flash_attention_with_kv_cache(
     return flash_attention(query, cached_key, cached_value, mask, scale);
 }
 
+void fused_qkv_split_rope(
+    const MNTensor& qkv_proj,
+    const MNTensor& cos_table,
+    const MNTensor& sin_table,
+    MNTensor& q_out,
+    MNTensor& k_out,
+    MNTensor& v_out,
+    int64_t batch,
+    int64_t seq_len,
+    int64_t num_heads,
+    int64_t head_dim,
+    int64_t start_pos) {
+
+    // Validate input shapes
+    MN_CHECK(qkv_proj.ndim() == 3,
+             MetalNativeError::InvalidArgument,
+             "fused_qkv_split_rope: qkv_proj must be 3D [batch, seq_len, 3*num_heads*head_dim]");
+
+    MN_CHECK(qkv_proj.shape()[0] == batch,
+             MetalNativeError::InvalidArgument,
+             "fused_qkv_split_rope: qkv_proj batch dimension mismatch");
+
+    MN_CHECK(qkv_proj.shape()[1] == seq_len,
+             MetalNativeError::InvalidArgument,
+             "fused_qkv_split_rope: qkv_proj seq_len dimension mismatch");
+
+    MN_CHECK(qkv_proj.shape()[2] == 3 * num_heads * head_dim,
+             MetalNativeError::InvalidArgument,
+             "fused_qkv_split_rope: qkv_proj last dimension must be 3*num_heads*head_dim");
+
+    MN_CHECK(head_dim % 2 == 0,
+             MetalNativeError::InvalidArgument,
+             "fused_qkv_split_rope: head_dim must be even for RoPE");
+
+    MN_CHECK(cos_table.ndim() == 2 && sin_table.ndim() == 2,
+             MetalNativeError::InvalidArgument,
+             "fused_qkv_split_rope: cos_table and sin_table must be 2D");
+
+    MN_CHECK(cos_table.shape()[1] == head_dim / 2 && sin_table.shape()[1] == head_dim / 2,
+             MetalNativeError::InvalidArgument,
+             "fused_qkv_split_rope: cos_table and sin_table second dim must be head_dim/2");
+
+    MN_CHECK(qkv_proj.dtype() == cos_table.dtype() && qkv_proj.dtype() == sin_table.dtype(),
+             MetalNativeError::InvalidArgument,
+             "fused_qkv_split_rope: all inputs must have the same dtype");
+
+    // Validate output shapes
+    MN_CHECK(q_out.ndim() == 4 && k_out.ndim() == 4 && v_out.ndim() == 4,
+             MetalNativeError::InvalidArgument,
+             "fused_qkv_split_rope: output tensors must be 4D [batch, num_heads, seq_len, head_dim]");
+
+    MN_CHECK(q_out.shape()[0] == batch && q_out.shape()[1] == num_heads &&
+             q_out.shape()[2] == seq_len && q_out.shape()[3] == head_dim,
+             MetalNativeError::InvalidArgument,
+             "fused_qkv_split_rope: q_out shape mismatch");
+
+    MN_CHECK(k_out.shape()[0] == batch && k_out.shape()[1] == num_heads &&
+             k_out.shape()[2] == seq_len && k_out.shape()[3] == head_dim,
+             MetalNativeError::InvalidArgument,
+             "fused_qkv_split_rope: k_out shape mismatch");
+
+    MN_CHECK(v_out.shape()[0] == batch && v_out.shape()[1] == num_heads &&
+             v_out.shape()[2] == seq_len && v_out.shape()[3] == head_dim,
+             MetalNativeError::InvalidArgument,
+             "fused_qkv_split_rope: v_out shape mismatch");
+
+    @autoreleasepool {
+        MNDevice& device = MNDevice::instance();
+
+        // Select kernel based on dtype and vectorization capability
+        const char* kernel_name = nullptr;
+        bool use_vectorized = (head_dim % 4 == 0);
+
+        if (qkv_proj.dtype() == MNDType::Float32) {
+            kernel_name = use_vectorized ? "fused_qkv_rope_fp32_vec4" : "fused_qkv_rope_fp32";
+        } else if (qkv_proj.dtype() == MNDType::Float16) {
+            kernel_name = use_vectorized ? "fused_qkv_rope_fp16_vec4" : "fused_qkv_rope_fp16";
+        } else {
+            MN_THROW(MetalNativeError::InvalidArgument,
+                     "fused_qkv_split_rope: unsupported dtype (only Float32 and Float16)");
+        }
+
+        id<MTLComputePipelineState> pipeline = KernelRegistry::instance().get_pipeline(kernel_name);
+
+        // Create command buffer and encoder
+        CommandPipeline& cmd_pipeline = device.command_pipeline();
+        id<MTLCommandBuffer> cmd_buffer = cmd_pipeline.current_buffer();
+        id<MTLComputeCommandEncoder> encoder = [cmd_buffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:pipeline];
+
+        // Bind buffers
+        [encoder setBuffer:qkv_proj.buffer()->metal_buffer() offset:qkv_proj.offset() atIndex:0];
+        [encoder setBuffer:cos_table.buffer()->metal_buffer() offset:cos_table.offset() atIndex:1];
+        [encoder setBuffer:sin_table.buffer()->metal_buffer() offset:sin_table.offset() atIndex:2];
+        [encoder setBuffer:q_out.buffer()->metal_buffer() offset:q_out.offset() atIndex:3];
+        [encoder setBuffer:k_out.buffer()->metal_buffer() offset:k_out.offset() atIndex:4];
+        [encoder setBuffer:v_out.buffer()->metal_buffer() offset:v_out.offset() atIndex:5];
+
+        // Set parameters
+        MN_CHECK(batch <= UINT32_MAX, MetalNativeError::InvalidArgument, "fused_qkv_split_rope: dimension exceeds uint32_t range");
+        MN_CHECK(seq_len <= UINT32_MAX, MetalNativeError::InvalidArgument, "fused_qkv_split_rope: dimension exceeds uint32_t range");
+        MN_CHECK(num_heads <= UINT32_MAX, MetalNativeError::InvalidArgument, "fused_qkv_split_rope: dimension exceeds uint32_t range");
+        MN_CHECK(head_dim <= UINT32_MAX, MetalNativeError::InvalidArgument, "fused_qkv_split_rope: dimension exceeds uint32_t range");
+        MN_CHECK(start_pos <= UINT32_MAX, MetalNativeError::InvalidArgument, "fused_qkv_split_rope: dimension exceeds uint32_t range");
+
+        uint32_t batch_u32 = static_cast<uint32_t>(batch);
+        uint32_t seq_len_u32 = static_cast<uint32_t>(seq_len);
+        uint32_t num_heads_u32 = static_cast<uint32_t>(num_heads);
+        uint32_t head_dim_u32 = static_cast<uint32_t>(head_dim);
+        uint32_t start_pos_u32 = static_cast<uint32_t>(start_pos);
+
+        [encoder setBytes:&batch_u32 length:sizeof(uint32_t) atIndex:6];
+        [encoder setBytes:&seq_len_u32 length:sizeof(uint32_t) atIndex:7];
+        [encoder setBytes:&num_heads_u32 length:sizeof(uint32_t) atIndex:8];
+        [encoder setBytes:&head_dim_u32 length:sizeof(uint32_t) atIndex:9];
+        [encoder setBytes:&start_pos_u32 length:sizeof(uint32_t) atIndex:10];
+
+        // Dispatch threadgroups
+        // Grid: [head_dim/2 (or head_dim/4 for vec4), seq_len, batch * num_heads]
+        uint32_t grid_x = use_vectorized ? (head_dim / 4) : (head_dim / 2);
+        MTLSize grid_size = MTLSizeMake(grid_x, seq_len, batch * num_heads);
+        MTLSize threadgroup_size = MTLSizeMake(32, 1, 1);  // Use warp size
+
+        [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:threadgroup_size];
+
+        [encoder endEncoding];
+        cmd_pipeline.commit_and_continue();
+    }
+}
+
 } // namespace metal_native

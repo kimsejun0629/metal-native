@@ -60,4 +60,40 @@ MNTensor flash_attention_with_kv_cache(
     const MNTensor* mask,
     float scale);
 
+/// Fused QKV Split + Reshape + RoPE (Rotary Position Embedding)
+///
+/// Takes a combined QKV projection tensor and performs three operations in one pass:
+/// 1. Split into separate Q, K, V tensors
+/// 2. Reshape from [batch, seq_len, 3*num_heads*head_dim] to [batch, num_heads, seq_len, head_dim]
+/// 3. Apply RoPE to Q and K (V is not rotated, just reshaped)
+///
+/// This fused kernel eliminates intermediate memory traffic and is significantly
+/// faster than separate operations.
+///
+/// @param qkv_proj     Combined QKV projection: [batch, seq_len, 3*num_heads*head_dim]
+/// @param cos_table    Precomputed cosine values: [max_seq_len, head_dim/2]
+/// @param sin_table    Precomputed sine values: [max_seq_len, head_dim/2]
+/// @param q_out        Output Q tensor: [batch, num_heads, seq_len, head_dim] (pre-allocated)
+/// @param k_out        Output K tensor: [batch, num_heads, seq_len, head_dim] (pre-allocated)
+/// @param v_out        Output V tensor: [batch, num_heads, seq_len, head_dim] (pre-allocated)
+/// @param batch        Batch size
+/// @param seq_len      Sequence length
+/// @param num_heads    Number of attention heads
+/// @param head_dim     Dimension per head (must be even)
+/// @param start_pos    Starting position for KV cache offset (0 for prefill)
+///
+/// @throws MNException(InvalidArgument) if shapes are incompatible or head_dim is odd
+void fused_qkv_split_rope(
+    const MNTensor& qkv_proj,
+    const MNTensor& cos_table,
+    const MNTensor& sin_table,
+    MNTensor& q_out,
+    MNTensor& k_out,
+    MNTensor& v_out,
+    int64_t batch,
+    int64_t seq_len,
+    int64_t num_heads,
+    int64_t head_dim,
+    int64_t start_pos);
+
 } // namespace metal_native

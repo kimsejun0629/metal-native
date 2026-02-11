@@ -7,6 +7,7 @@
 #include "metal_native/core/buffer.h"
 #include "metal_native/core/device.h"
 #include "metal_native/core/error.h"
+#include "metal_native/memory/allocator.h"
 
 #include <utility>
 
@@ -22,6 +23,11 @@ struct MNBuffer::Impl {
     StorageMode   mode    = StorageMode::Shared;
     bool          no_copy = false; // true for create_zero_copy buffers
     std::function<void()> release_callback; // Optional callback for wrap_external
+
+    // Allocator-backed buffer support: when from_allocator is true, the
+    // destructor returns the block to the pool instead of releasing it.
+    bool           from_allocator = false;
+    AllocatedBlock alloc_block;
 };
 
 // ---------------------------------------------------------------------------
@@ -66,8 +72,14 @@ MNBuffer::MNBuffer(MNDevice& device, size_t size, StorageMode mode)
 // ---------------------------------------------------------------------------
 
 MNBuffer::~MNBuffer() {
-    if (impl_ && impl_->release_callback) {
-        impl_->release_callback();
+    if (impl_) {
+        if (impl_->from_allocator) {
+            // Return buffer to the allocator pool for reuse.
+            MNDevice::instance().allocator().deallocate(impl_->alloc_block);
+        }
+        if (impl_->release_callback) {
+            impl_->release_callback();
+        }
     }
 }
 
@@ -149,6 +161,30 @@ std::unique_ptr<MNBuffer> MNBuffer::create_zero_copy(
     buf->impl_->size    = size;
     buf->impl_->mode    = StorageMode::Shared;
     buf->impl_->no_copy = true;
+
+    return buf;
+}
+
+// ---------------------------------------------------------------------------
+// allocate_pooled
+// ---------------------------------------------------------------------------
+
+std::shared_ptr<MNBuffer> MNBuffer::allocate_pooled(
+    MNDevice& device, size_t size, StorageMode mode) {
+    MN_CHECK(size > 0,
+             MetalNativeError::InvalidArgument,
+             "allocate_pooled: size must be > 0");
+
+    auto& alloc = device.allocator();
+    AllocatedBlock block = alloc.allocate(size, mode);
+
+    auto buf = std::shared_ptr<MNBuffer>(new MNBuffer());
+    buf->impl_ = std::make_unique<Impl>();
+    buf->impl_->buffer         = block.buffer;
+    buf->impl_->size           = size;
+    buf->impl_->mode           = mode;
+    buf->impl_->from_allocator = true;
+    buf->impl_->alloc_block    = block;
 
     return buf;
 }
