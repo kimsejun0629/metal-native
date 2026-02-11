@@ -2,6 +2,7 @@
 /// @brief Objective-C++ implementation of matrix multiplication operators.
 
 #import <Metal/Metal.h>
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 #import <Foundation/Foundation.h>
 #import <Accelerate/Accelerate.h>
@@ -13,6 +14,7 @@
 #include "metal_native/graph/graph_builder.h"
 #include "metal_native/graph/graph_cache.h"
 #include "metal_native/memory/budget_controller.h"
+#include "metal_native/dispatch/command_pipeline.h"
 
 #include <mutex>
 #include <unordered_map>
@@ -308,26 +310,44 @@ MNTensor matmul(const MNTensor& a,
         // Allocate output tensor
         MNTensor result = MNTensor::empty(output_shape, a.dtype(), device);
 
-
-        // Execute the graph
-        id<MTLCommandQueue> queue = device.command_queue();
-        MPSGraphExecutionDescriptor* exec_desc = [[MPSGraphExecutionDescriptor alloc] init];
-        exec_desc.waitUntilCompleted = NO;
+        // Create result tensor data backed by our output buffer so MPSGraph
+        // writes directly into it (zero-copy output).
+        MPSGraphTensorData* result_data = [[MPSGraphTensorData alloc]
+            initWithMTLBuffer:result.buffer()->metal_buffer()
+                       shape:to_ns_shape(output_shape)
+                    dataType:to_mps_datatype(a.dtype())];
 
         NSDictionary* feeds = @{
             a_tensor: a_data,
             b_tensor: b_data
         };
+        NSDictionary* results_dict = @{
+            result_tensor: result_data
+        };
 
-        NSDictionary* results = [graph runAsyncWithMTLCommandQueue:queue
-                                                             feeds:feeds
-                                                    targetTensors:@[result_tensor]
-                                                 targetOperations:nil
-                                                executionDescriptor:exec_desc];
+        @try {
+            // Encode the graph asynchronously into the command pipeline's buffer.
+            // Using MPSCommandBuffer + resultsDictionary so MPSGraph writes
+            // directly into our pre-allocated output buffer (zero-copy).
+            CommandPipeline& cmd_pipeline = device.command_pipeline();
+            id<MTLCommandBuffer> cmd_buffer = cmd_pipeline.current_buffer();
+            MPSCommandBuffer* mps_cmd_buf =
+                [MPSCommandBuffer commandBufferWithCommandBuffer:cmd_buffer];
 
-        MN_CHECK(results != nil && results[result_tensor] != nil,
-                 MetalNativeError::InternalError,
-                 "matmul: graph execution failed");
+            [graph encodeToCommandBuffer:mps_cmd_buf
+                                   feeds:feeds
+                        targetOperations:nil
+                       resultsDictionary:results_dict
+                     executionDescriptor:nil];
+
+            // MPSCommandBuffer may internally commit the underlying buffer,
+            // so always flush here regardless of lazy commit mode.
+            cmd_pipeline.flush();
+        } @catch (NSException* exception) {
+            MN_THROW(MetalNativeError::InternalError,
+                     "matmul: MPSGraph execution failed: " +
+                     std::string([[exception reason] UTF8String]));
+        }
 
         return result;
     }

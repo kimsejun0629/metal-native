@@ -21,6 +21,12 @@ namespace {
 constexpr uint32_t TILE_SIZE = 16;
 constexpr uint32_t TILE_SIZE_24 = 24;
 
+// Note: tile32 variant (if added) must only be used when head_dim <= 64
+// due to threadgroup memory constraints:
+//   tile32 + head_dim=128 + FP16 = 40,960 bytes (exceeds 32KB limit)
+//   tile32 + head_dim=64  + FP16 = 24,576 bytes (within 32KB limit)
+// The constraint is enforced in kernel selection logic below.
+
 } // anonymous namespace
 
 MNTensor flash_attention(const MNTensor& query,
@@ -90,7 +96,13 @@ MNTensor flash_attention(const MNTensor& query,
             // Use larger tile when head_dim fits in 32KB threadgroup memory
             // and memory pressure is normal (budget allows performance optimization)
             float pressure_mult = MemoryBudgetController::instance().pressure_multiplier();
-            if (head_dim <= 128 && pressure_mult >= 1.0f) {
+
+            // Memory pressure fallback: use smaller tile to minimize threadgroup memory
+            // tile16 uses ~17KB vs tile24's ~29KB for FP16+head_dim=128
+            // At Warning or Critical pressure, conserve threadgroup memory
+            bool use_tile24 = (head_dim <= 128 && pressure_mult >= 1.0f);
+
+            if (use_tile24) {
                 kernel_name = "flash_attention_simd_kernel_fp16_tile24";
             } else {
                 kernel_name = "flash_attention_simd_kernel_fp16";
@@ -168,7 +180,9 @@ MNTensor flash_attention(const MNTensor& query,
         [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:threadgroup_size];
 
         [encoder endEncoding];
-        cmd_pipeline.commit();
+        // OPT-5: Use commit_and_continue to allow command buffer reuse.
+        // The next operation can encode into a fresh buffer without waiting for this one.
+        cmd_pipeline.commit_and_continue();
 
         return output;
     }

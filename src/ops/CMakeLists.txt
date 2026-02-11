@@ -16,6 +16,7 @@ set(OPS_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/mixed_precision.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/batch_advisor.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/speculative_buffers.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/speculative.mm
 )
 
 add_library(metal_native_ops STATIC ${OPS_SOURCES})

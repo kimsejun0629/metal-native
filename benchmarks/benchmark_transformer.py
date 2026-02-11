@@ -225,21 +225,16 @@ def get_model_configs() -> List[Dict]:
         List of configuration dicts
     """
     return [
-        # GPT-2 Small (125M params)
-        {'name': 'GPT2-Small', 'batch': 1, 'seq_len': 512, 'd_model': 768,
-         'n_heads': 12, 'd_ff': 3072, 'params_m': 125},
-        # GPT-2 Medium (350M params)
-        {'name': 'GPT2-Medium', 'batch': 1, 'seq_len': 512, 'd_model': 1024,
-         'n_heads': 16, 'd_ff': 4096, 'params_m': 350},
-        # GPT-2 Large (774M params)
-        {'name': 'GPT2-Large', 'batch': 1, 'seq_len': 512, 'd_model': 1280,
-         'n_heads': 20, 'd_ff': 5120, 'params_m': 774},
-        # GPT-2 XL (1.5B params)
-        {'name': 'GPT2-XL', 'batch': 1, 'seq_len': 512, 'd_model': 1600,
-         'n_heads': 25, 'd_ff': 6400, 'params_m': 1500},
-        # Llama-like (7B scale, single layer)
-        {'name': 'Llama-7B-Block', 'batch': 1, 'seq_len': 512, 'd_model': 4096,
-         'n_heads': 32, 'd_ff': 11008, 'params_m': 7000},
+        {'name': 'Qwen2.5-0.5B', 'batch': 1, 'seq_len': 512, 'd_model': 896,
+         'n_heads': 14, 'd_ff': 4864, 'params_m': 490},
+        {'name': 'Qwen2.5-1.5B', 'batch': 1, 'seq_len': 512, 'd_model': 1536,
+         'n_heads': 12, 'd_ff': 8960, 'params_m': 1500},
+        {'name': 'Qwen2.5-3B', 'batch': 1, 'seq_len': 512, 'd_model': 2048,
+         'n_heads': 16, 'd_ff': 11008, 'params_m': 3090},
+        {'name': 'Llama-3.2-3B', 'batch': 1, 'seq_len': 512, 'd_model': 3072,
+         'n_heads': 24, 'd_ff': 8192, 'params_m': 3210},
+        {'name': 'Qwen2.5-7B', 'batch': 1, 'seq_len': 512, 'd_model': 3584,
+         'n_heads': 28, 'd_ff': 18944, 'params_m': 7620},
     ]
 
 
@@ -308,7 +303,7 @@ def main():
     """Main benchmark entry point."""
     parser = argparse.ArgumentParser(description='Benchmark transformer block performance')
     parser.add_argument('--models', type=str, nargs='+',
-                       choices=['GPT2-Small', 'GPT2-Medium', 'GPT2-Large', 'GPT2-XL', 'Llama-7B-Block', 'all'],
+                       choices=['Qwen2.5-0.5B', 'Qwen2.5-1.5B', 'Qwen2.5-3B', 'Llama-3.2-3B', 'Qwen2.5-7B', 'all'],
                        default=['all'],
                        help='Model configurations to benchmark')
     parser.add_argument('--iterations', type=int, default=10,

@@ -22,6 +22,38 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# MetalNative bindings
+HAS_METAL_NATIVE = False
+try:
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'python'))
+    import metal_native._C as _C
+    # Load Metal shader library
+    metallib_path = os.path.join(os.path.dirname(__file__), '..', 'build', 'shaders', 'metal_native.metallib')
+    if os.path.exists(metallib_path):
+        _C.load_library(metallib_path)
+        HAS_METAL_NATIVE = True
+        print("[MetalNative] Loaded real fused Metal kernels")
+    else:
+        print(f"[MetalNative] metallib not found at {metallib_path}")
+except ImportError as e:
+    print(f"[MetalNative] Not available: {e}")
+
+def to_mn(t):
+    """Convert PyTorch MPS tensor to MNTensor (zero-copy)."""
+    if not t.is_contiguous():
+        t = t.contiguous()
+    dtype_map = {torch.float32: 'float32', torch.float16: 'float16'}
+    return _C.tensor_from_mps_ptr(
+        t.data_ptr(), t.untyped_storage().nbytes(),
+        list(t.shape), list(t.stride()),
+        dtype_map[t.dtype]
+    )
+
+def sync_mn():
+    """Synchronize MetalNative command queue."""
+    _C.synchronize()
+
 
 # ============================================================================
 # Benchmark Infrastructure
@@ -49,6 +81,8 @@ class BenchmarkResult:
 def sync_mps():
     """Synchronize MPS device."""
     torch.mps.synchronize()
+    if HAS_METAL_NATIVE:
+        _C.synchronize()
 
 
 def benchmark_fn(fn, warmup=5, iterations=20, sync=False):
@@ -117,16 +151,20 @@ def benchmark_matmul(sizes=None, warmup=5, iterations=20) -> List[BenchmarkResul
         sync_mps()
         mps_ms = benchmark_fn(lambda: torch.matmul(a_mps, b_mps), warmup, iterations, sync=True)
 
-        # Optimized MPS (FP16 compute with FP32 accumulation - MetalNative approach)
-        a_fp16 = a_cpu.half().to('mps')
-        b_fp16 = b_cpu.half().to('mps')
-        sync_mps()
-
-        def matmul_mixed_precision():
-            c = torch.matmul(a_fp16, b_fp16)
-            return c.float()
-
-        opt_ms = benchmark_fn(matmul_mixed_precision, warmup, iterations, sync=True)
+        # Optimized MPS: MetalNative matmul kernel
+        if HAS_METAL_NATIVE:
+            def matmul_metal_native():
+                return _C.matmul(to_mn(a_mps), to_mn(b_mps))
+            opt_ms = benchmark_fn(matmul_metal_native, warmup, iterations, sync=True)
+        else:
+            # Fallback: FP16 compute with FP32 accumulation
+            a_fp16 = a_cpu.half().to('mps')
+            b_fp16 = b_cpu.half().to('mps')
+            sync_mps()
+            def matmul_mixed_precision():
+                c = torch.matmul(a_fp16, b_fp16)
+                return c.float()
+            opt_ms = benchmark_fn(matmul_mixed_precision, warmup, iterations, sync=True)
 
         cpu_gflops = (flops / 1e9) / (cpu_ms / 1000)
         mps_gflops = (flops / 1e9) / (mps_ms / 1000)
@@ -147,7 +185,8 @@ def benchmark_matmul(sizes=None, warmup=5, iterations=20) -> List[BenchmarkResul
             optimized_speedup_vs_cpu=cpu_ms / opt_ms,
         )
         results.append(r)
-        print(f" -> CPU: {cpu_ms:.2f}ms | MPS: {mps_ms:.2f}ms ({r.mps_speedup_vs_cpu:.1f}x) | Opt: {opt_ms:.2f}ms ({r.optimized_speedup_vs_mps:.2f}x vs MPS)")
+        label = "MN" if HAS_METAL_NATIVE else "Opt"
+        print(f" -> CPU: {cpu_ms:.2f}ms | MPS: {mps_ms:.2f}ms ({r.mps_speedup_vs_cpu:.1f}x) | {label}: {opt_ms:.2f}ms ({r.optimized_speedup_vs_mps:.2f}x vs MPS)")
 
     return results
 
@@ -266,14 +305,19 @@ def benchmark_softmax(warmup=5, iterations=20) -> List[BenchmarkResult]:
         sync_mps()
         mps_ms = benchmark_fn(lambda: F.softmax(x_mps, dim=-1), warmup, iterations, sync=True)
 
-        # Optimized: numerically stable 3-pass with FP16 (MetalNative approach)
-        x_fp16 = x_cpu.half().to('mps')
-        sync_mps()
-
-        def optimized_softmax():
-            return F.softmax(x_fp16, dim=-1).float()
-
-        opt_ms = benchmark_fn(optimized_softmax, warmup, iterations, sync=True)
+        # Optimized: MetalNative fused softmax kernel
+        if HAS_METAL_NATIVE:
+            def optimized_softmax():
+                result = _C.softmax(to_mn(x_mps), -1)
+                return result
+            opt_ms = benchmark_fn(optimized_softmax, warmup, iterations, sync=True)
+        else:
+            # Fallback: FP16 simulation
+            x_fp16 = x_cpu.half().to('mps')
+            sync_mps()
+            def optimized_softmax():
+                return F.softmax(x_fp16, dim=-1).float()
+            opt_ms = benchmark_fn(optimized_softmax, warmup, iterations, sync=True)
 
         r = BenchmarkResult(
             name="Softmax",
@@ -287,7 +331,8 @@ def benchmark_softmax(warmup=5, iterations=20) -> List[BenchmarkResult]:
             optimized_speedup_vs_cpu=cpu_ms / opt_ms,
         )
         results.append(r)
-        print(f" -> CPU: {cpu_ms:.2f}ms | MPS: {mps_ms:.2f}ms | Opt: {opt_ms:.2f}ms ({r.optimized_speedup_vs_mps:.2f}x)")
+        label = "MN" if HAS_METAL_NATIVE else "Opt"
+        print(f" -> CPU: {cpu_ms:.2f}ms | MPS: {mps_ms:.2f}ms | {label}: {opt_ms:.2f}ms ({r.optimized_speedup_vs_mps:.2f}x)")
 
     return results
 
@@ -299,10 +344,10 @@ def benchmark_softmax(warmup=5, iterations=20) -> List[BenchmarkResult]:
 def benchmark_layernorm(warmup=5, iterations=20) -> List[BenchmarkResult]:
     """Benchmark LayerNorm at various sizes."""
     configs = [
-        {"batch": 2, "seq_len": 512, "d_model": 768, "name": "GPT2-Small"},
-        {"batch": 2, "seq_len": 512, "d_model": 1024, "name": "GPT2-Medium"},
-        {"batch": 1, "seq_len": 1024, "d_model": 1280, "name": "GPT2-Large"},
-        {"batch": 1, "seq_len": 1024, "d_model": 4096, "name": "Llama-7B"},
+        {"batch": 2, "seq_len": 512, "d_model": 896, "name": "Qwen2.5-0.5B"},
+        {"batch": 2, "seq_len": 512, "d_model": 1536, "name": "Qwen2.5-1.5B"},
+        {"batch": 1, "seq_len": 1024, "d_model": 2048, "name": "Qwen2.5-3B"},
+        {"batch": 1, "seq_len": 1024, "d_model": 3584, "name": "Qwen2.5-7B"},
     ]
 
     results = []
@@ -324,15 +369,22 @@ def benchmark_layernorm(warmup=5, iterations=20) -> List[BenchmarkResult]:
         sync_mps()
         mps_ms = benchmark_fn(lambda: ln_mps(x_mps), warmup, iterations, sync=True)
 
-        # Optimized: Fused RMSNorm (MetalNative approach - simulated via manual implementation)
-        weight_mps = ln_mps.weight.detach()
-        eps = 1e-5
-
-        def fused_rmsnorm():
-            variance = x_mps.pow(2).mean(-1, keepdim=True)
-            return x_mps * torch.rsqrt(variance + eps) * weight_mps
-
-        opt_ms = benchmark_fn(fused_rmsnorm, warmup, iterations, sync=True)
+        # Optimized: MetalNative fused RMSNorm kernel
+        if HAS_METAL_NATIVE:
+            weight_mps = torch.ones(D, device='mps', dtype=torch.float32)
+            sync_mps()
+            def fused_rmsnorm():
+                result = _C.fast.rms_norm(to_mn(x_mps), to_mn(weight_mps), 1e-5)
+                return result
+            opt_ms = benchmark_fn(fused_rmsnorm, warmup, iterations, sync=True)
+        else:
+            # Fallback: manual RMSNorm simulation
+            weight_mps = ln_mps.weight.detach()
+            eps = 1e-5
+            def fused_rmsnorm():
+                variance = x_mps.pow(2).mean(-1, keepdim=True)
+                return x_mps * torch.rsqrt(variance + eps) * weight_mps
+            opt_ms = benchmark_fn(fused_rmsnorm, warmup, iterations, sync=True)
 
         r = BenchmarkResult(
             name="LayerNorm",
@@ -346,7 +398,8 @@ def benchmark_layernorm(warmup=5, iterations=20) -> List[BenchmarkResult]:
             optimized_speedup_vs_cpu=cpu_ms / opt_ms,
         )
         results.append(r)
-        print(f" -> CPU: {cpu_ms:.2f}ms | MPS: {mps_ms:.2f}ms | Opt(RMS): {opt_ms:.2f}ms ({r.optimized_speedup_vs_mps:.2f}x)")
+        label = "MN(RMSNorm)" if HAS_METAL_NATIVE else "Opt(RMS)"
+        print(f" -> CPU: {cpu_ms:.2f}ms | MPS: {mps_ms:.2f}ms | {label}: {opt_ms:.2f}ms ({r.optimized_speedup_vs_mps:.2f}x)")
 
     return results
 
@@ -358,10 +411,10 @@ def benchmark_layernorm(warmup=5, iterations=20) -> List[BenchmarkResult]:
 def benchmark_elementwise(warmup=5, iterations=20) -> List[BenchmarkResult]:
     """Benchmark elementwise operations (GELU, SiLU, Add+Mul fused)."""
     sizes = [
-        (2, 512, 768),     # GPT2-Small hidden
-        (2, 512, 3072),    # GPT2-Small FFN
-        (1, 1024, 4096),   # Llama-7B hidden
-        (1, 1024, 11008),  # Llama-7B FFN
+        (2, 512, 896),      # Qwen2.5-0.5B hidden
+        (2, 512, 4864),     # Qwen2.5-0.5B FFN
+        (1, 1024, 3584),    # Qwen2.5-7B hidden
+        (1, 1024, 18944),   # Qwen2.5-7B FFN
     ]
 
     results = []
@@ -379,14 +432,19 @@ def benchmark_elementwise(warmup=5, iterations=20) -> List[BenchmarkResult]:
         sync_mps()
         mps_ms = benchmark_fn(lambda: F.gelu(x_mps), warmup, iterations, sync=True)
 
-        # Optimized: SiLU is faster on Metal + fused multiply (MetalNative approach)
+        # Optimized: MetalNative fused SwiGLU kernel
         gate_mps = torch.randn(*shape, dtype=torch.float32, device='mps')
         sync_mps()
-
-        def fused_silu_gate():
-            return F.silu(x_mps) * gate_mps
-
-        opt_ms = benchmark_fn(fused_silu_gate, warmup, iterations, sync=True)
+        if HAS_METAL_NATIVE:
+            def fused_silu_gate():
+                result = _C.fast.swiglu(to_mn(x_mps), to_mn(gate_mps))
+                return result
+            opt_ms = benchmark_fn(fused_silu_gate, warmup, iterations, sync=True)
+        else:
+            # Fallback: SiLU + multiply simulation
+            def fused_silu_gate():
+                return F.silu(x_mps) * gate_mps
+            opt_ms = benchmark_fn(fused_silu_gate, warmup, iterations, sync=True)
 
         r = BenchmarkResult(
             name="Elementwise(GELU/SiLU)",
@@ -400,7 +458,8 @@ def benchmark_elementwise(warmup=5, iterations=20) -> List[BenchmarkResult]:
             optimized_speedup_vs_cpu=cpu_ms / opt_ms,
         )
         results.append(r)
-        print(f" -> CPU: {cpu_ms:.2f}ms | MPS(GELU): {mps_ms:.2f}ms | Opt(SiLU+Gate): {opt_ms:.2f}ms")
+        label = "MN(SwiGLU)" if HAS_METAL_NATIVE else "Opt(SiLU+Gate)"
+        print(f" -> CPU: {cpu_ms:.2f}ms | MPS(GELU): {mps_ms:.2f}ms | {label}: {opt_ms:.2f}ms")
 
     return results
 
@@ -591,10 +650,10 @@ class StandardTransformerBlock(nn.Module):
 def benchmark_transformer_block(warmup=3, iterations=10) -> List[BenchmarkResult]:
     """Benchmark full transformer blocks."""
     configs = [
-        {"name": "GPT2-Small", "d_model": 768, "n_heads": 12, "d_ff": 3072, "seq_len": 512, "batch": 2},
-        {"name": "GPT2-Medium", "d_model": 1024, "n_heads": 16, "d_ff": 4096, "seq_len": 512, "batch": 1},
-        {"name": "GPT2-Large", "d_model": 1280, "n_heads": 20, "d_ff": 5120, "seq_len": 512, "batch": 1},
-        {"name": "Llama-7B-Block", "d_model": 4096, "n_heads": 32, "d_ff": 11008, "seq_len": 512, "batch": 1},
+        {"name": "Qwen2.5-0.5B", "d_model": 896, "n_heads": 14, "d_ff": 4864, "seq_len": 512, "batch": 2},
+        {"name": "Qwen2.5-1.5B", "d_model": 1536, "n_heads": 12, "d_ff": 8960, "seq_len": 512, "batch": 1},
+        {"name": "Qwen2.5-3B", "d_model": 2048, "n_heads": 16, "d_ff": 11008, "seq_len": 512, "batch": 1},
+        {"name": "Qwen2.5-7B", "d_model": 3584, "n_heads": 28, "d_ff": 18944, "seq_len": 512, "batch": 1},
     ]
 
     results = []

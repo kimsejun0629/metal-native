@@ -9,10 +9,18 @@
 #include "metal_native/core/device.h"
 #include "metal_native/core/error.h"
 #include "metal_native/graph/fusion_patterns.h"
+#include "metal_native/ops/elementwise.h"
+#include "metal_native/ops/normalization.h"
+#include "metal_native/ops/softmax.h"
+#include "metal_native/ops/matmul.h"
+#include "metal_native/future/fast_ops.h"
 
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
+#include <functional>
+#include <cmath>
 
 namespace metal_native {
 
@@ -26,6 +34,138 @@ struct LazyGraph::Impl {
 
     LazyNodeId allocate_id() {
         return next_id++;
+    }
+
+    std::shared_ptr<MNTensor> execute_node(LazyNode& node) {
+        // Input nodes are already materialized
+        if (node.op_type == OpType::Unknown) {
+            return node.result;
+        }
+
+        // Gather materialized inputs
+        std::vector<std::shared_ptr<MNTensor>> inputs;
+        for (LazyNodeId inp_id : node.inputs) {
+            auto it = nodes.find(inp_id);
+            if (it == nodes.end() || it->second.status != LazyNodeStatus::Materialized) {
+                return nullptr; // Input not ready
+            }
+            inputs.push_back(it->second.result);
+        }
+
+        // Get default device
+        MNDevice& device = MNDevice::instance();
+
+        // Dispatch based on op type
+        switch (node.op_type) {
+            case OpType::Add: {
+                if (inputs.size() == 2) {
+                    auto result = std::make_shared<MNTensor>(
+                        add(*inputs[0], *inputs[1], device));
+                    return result;
+                }
+                break;
+            }
+            case OpType::Mul: {
+                if (inputs.size() == 2) {
+                    auto result = std::make_shared<MNTensor>(
+                        mul(*inputs[0], *inputs[1], device));
+                    return result;
+                }
+                break;
+            }
+            case OpType::ReLU: {
+                if (inputs.size() == 1) {
+                    auto result = std::make_shared<MNTensor>(
+                        clamp(*inputs[0], 0.0f, HUGE_VALF, device));
+                    return result;
+                }
+                break;
+            }
+            case OpType::Softmax: {
+                if (inputs.size() == 1) {
+                    auto result = std::make_shared<MNTensor>(
+                        softmax(*inputs[0], -1));
+                    return result;
+                }
+                break;
+            }
+            case OpType::RMSNorm: {
+                if (inputs.size() >= 2) {
+                    float eps = (node.scalar_params.size() > 0) ?
+                        static_cast<float>(node.scalar_params[0]) : 1e-6f;
+                    auto result = std::make_shared<MNTensor>(
+                        fast::rms_norm(*inputs[0], *inputs[1], eps));
+                    return result;
+                }
+                break;
+            }
+            case OpType::LayerNorm: {
+                if (inputs.size() >= 3) {
+                    float eps = (node.scalar_params.size() > 0) ?
+                        static_cast<float>(node.scalar_params[0]) : 1e-5f;
+                    auto result = std::make_shared<MNTensor>(
+                        fast::layer_norm(*inputs[0], *inputs[1], *inputs[2], eps));
+                    return result;
+                }
+                break;
+            }
+            case OpType::SwiGLU: {
+                if (inputs.size() == 2) {
+                    auto result = std::make_shared<MNTensor>(
+                        fast::swiglu(*inputs[0], *inputs[1]));
+                    return result;
+                }
+                break;
+            }
+            case OpType::MatMul: {
+                if (inputs.size() == 2) {
+                    auto result = std::make_shared<MNTensor>(
+                        matmul(*inputs[0], *inputs[1]));
+                    return result;
+                }
+                break;
+            }
+            default:
+                break;
+        }
+
+        return nullptr; // Unsupported op
+    }
+
+    std::vector<LazyNodeId> topological_sort(LazyNodeId target) {
+        std::vector<LazyNodeId> order;
+        std::unordered_set<LazyNodeId> visited;
+        std::unordered_set<LazyNodeId> in_stack;  // cycle detection
+
+        std::function<bool(LazyNodeId)> dfs = [&](LazyNodeId id) -> bool {
+            if (visited.count(id)) return true;
+            if (in_stack.count(id)) return false; // cycle!
+
+            in_stack.insert(id);
+
+            auto it = nodes.find(id);
+            if (it == nodes.end()) return false;
+
+            // Already materialized - no need to traverse further
+            if (it->second.status == LazyNodeStatus::Materialized) {
+                visited.insert(id);
+                in_stack.erase(id);
+                return true;
+            }
+
+            // Visit inputs first
+            for (LazyNodeId inp : it->second.inputs) {
+                if (!dfs(inp)) return false;
+            }
+
+            visited.insert(id);
+            in_stack.erase(id);
+            order.push_back(id);
+            return true;
+        };
+
+        dfs(target);
+        return order;
     }
 };
 
@@ -116,29 +256,71 @@ MNTensor& LazyGraph::eval(LazyNodeId node_id) {
              MetalNativeError::InvalidArgument,
              "LazyGraph::eval: node not found");
 
+    // Already materialized - return directly
     if (it->second.status == LazyNodeStatus::Materialized) {
         return *(it->second.result);
     }
 
-    // TODO: Full implementation would:
-    // 1. Topological sort from this node back to inputs
-    // 2. Run fusion optimization on the subgraph
-    // 3. Build MPSGraph from the optimized subgraph
-    // 4. Execute and store results
-    // For now, throw - operations still execute eagerly
-    MN_THROW(MetalNativeError::NotImplemented,
-             "LazyGraph::eval: deferred evaluation not yet implemented. "
-             "Use LazyGraph::set_enabled(false) for eager mode.");
+    // Phase A: Topological sort + sequential execution
+    auto order = impl_->topological_sort(node_id);
+
+    MN_CHECK(!order.empty(),
+             MetalNativeError::InternalError,
+             "LazyGraph::eval: topological sort produced empty order (cycle detected?)");
+
+    // Execute each node in topological order
+    for (LazyNodeId exec_id : order) {
+        auto node_it = impl_->nodes.find(exec_id);
+        if (node_it == impl_->nodes.end()) continue;
+        if (node_it->second.status == LazyNodeStatus::Materialized) continue;
+
+        node_it->second.status = LazyNodeStatus::Scheduled;
+
+        auto result = impl_->execute_node(node_it->second);
+        MN_CHECK(result != nullptr,
+                 MetalNativeError::InternalError,
+                 "LazyGraph::eval: failed to execute node " +
+                 std::string(op_type_name(node_it->second.op_type)));
+
+        node_it->second.result = std::move(result);
+        node_it->second.status = LazyNodeStatus::Materialized;
+    }
+
+    // Return the target node's result
+    it = impl_->nodes.find(node_id);
+    MN_CHECK(it->second.status == LazyNodeStatus::Materialized,
+             MetalNativeError::InternalError,
+             "LazyGraph::eval: node not materialized after execution");
+
+    return *(it->second.result);
 }
 
 void LazyGraph::eval_all() {
     std::lock_guard<std::mutex> lock(impl_->mu);
 
     // Find all leaf nodes (nodes with ref_count == 0 that aren't materialized)
+    std::vector<LazyNodeId> leaves;
     for (auto& [id, node] : impl_->nodes) {
         if (node.status == LazyNodeStatus::Pending && node.ref_count == 0) {
-            // This is an output node - would need to evaluate
-            // TODO: implement batch evaluation
+            leaves.push_back(id);
+        }
+    }
+
+    // Evaluate each leaf (which will pull in all dependencies)
+    for (LazyNodeId leaf_id : leaves) {
+        auto order = impl_->topological_sort(leaf_id);
+
+        for (LazyNodeId exec_id : order) {
+            auto node_it = impl_->nodes.find(exec_id);
+            if (node_it == impl_->nodes.end()) continue;
+            if (node_it->second.status == LazyNodeStatus::Materialized) continue;
+
+            node_it->second.status = LazyNodeStatus::Scheduled;
+            auto result = impl_->execute_node(node_it->second);
+            if (result) {
+                node_it->second.result = std::move(result);
+                node_it->second.status = LazyNodeStatus::Materialized;
+            }
         }
     }
 }

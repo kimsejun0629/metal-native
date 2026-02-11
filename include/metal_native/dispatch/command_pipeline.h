@@ -58,13 +58,45 @@ public:
     /// This adds a completion handler, commits the buffer, and advances
     /// the ring index.  Blocks if all buffer slots are in-flight
     /// (backpressure).
+    ///
+    /// OPT-5: This method enables command buffer batching by allowing
+    /// consecutive operations to encode into fresh buffers without
+    /// waiting for GPU completion. The backpressure controller ensures
+    /// CPU doesn't get too far ahead of GPU (default: 3 buffers).
+    ///
+    /// USE THIS by default in operation implementations unless you need
+    /// explicit synchronization (e.g., reading results back to CPU).
     void commit_and_continue();
 
     /// Commit the current command buffer (final submission, no rotation).
+    ///
+    /// NOTE: This does NOT wait for GPU completion. It simply commits
+    /// the buffer and marks the pipeline as having no active buffer.
+    /// The next call to current_buffer() will create a new one.
+    ///
+    /// WHEN TO USE: Use commit() when you're done with a sequence of
+    /// operations and don't expect another operation immediately after.
+    /// For most operation implementations, prefer commit_and_continue().
     void commit();
 
     /// Block until all in-flight command buffers have completed on the GPU.
     void synchronize();
+
+    // -- Lazy commit mode ----------------------------------------------------
+
+    /// Enable/disable lazy commit mode.
+    ///
+    /// When enabled, commit_and_continue() becomes a no-op — operations
+    /// accumulate in the current command buffer until synchronize() or
+    /// flush() is called.  This matches PyTorch MPS behavior where many
+    /// operations are batched into a single command buffer submission.
+    ///
+    /// Default: false (each operation commits immediately).
+    void set_lazy_commit(bool enable);
+    bool lazy_commit() const noexcept;
+
+    /// Flush: commit the current buffer if one is active (even in lazy mode).
+    void flush();
 
     // -- Queries -------------------------------------------------------------
 

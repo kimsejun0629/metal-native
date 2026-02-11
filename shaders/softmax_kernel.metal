@@ -292,6 +292,86 @@ kernel void softmax_online_fp16(
     }
 }
 
+// SIMD-cooperative softmax: 32 threads cooperate on each (outer_idx, inner_idx) pair
+// 2-pass design: Pass 1 = find max + sum, Pass 2 = normalize and write
+kernel void softmax_simd_cooperative_fp32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& outer_size [[buffer(2)]],
+    constant uint& reduce_size [[buffer(3)]],
+    constant uint& inner_size [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    // Each threadgroup handles one (outer_idx, inner_idx) pair
+    // gid.x = inner_idx, gid.y = outer_idx
+    const uint inner_idx = gid.x;
+    const uint outer_idx = gid.y;
+
+    if (inner_idx >= inner_size || outer_idx >= outer_size) return;
+
+    const uint base = outer_idx * reduce_size * inner_size + inner_idx;
+    const uint stride = inner_size;  // stride between consecutive reduce elements
+
+    // Pass 1: Find max using SIMD cooperative reduction
+    float thread_max = -INFINITY;
+    for (uint i = lane; i < reduce_size; i += 32) {
+        thread_max = max(thread_max, input[base + i * stride]);
+    }
+    float row_max = simd_max(thread_max);
+
+    // Pass 1 continued: Compute sum of exp(x - max)
+    float thread_sum = 0.0f;
+    for (uint i = lane; i < reduce_size; i += 32) {
+        thread_sum += exp(input[base + i * stride] - row_max);
+    }
+    float row_sum = simd_sum(thread_sum);
+
+    // Pass 2: Normalize and write output
+    float inv_sum = 1.0f / row_sum;
+    for (uint i = lane; i < reduce_size; i += 32) {
+        output[base + i * stride] = exp(input[base + i * stride] - row_max) * inv_sum;
+    }
+}
+
+kernel void softmax_simd_cooperative_fp16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& outer_size [[buffer(2)]],
+    constant uint& reduce_size [[buffer(3)]],
+    constant uint& inner_size [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    const uint inner_idx = gid.x;
+    const uint outer_idx = gid.y;
+
+    if (inner_idx >= inner_size || outer_idx >= outer_size) return;
+
+    const uint base = outer_idx * reduce_size * inner_size + inner_idx;
+    const uint stride = inner_size;
+
+    // Pass 1: Find max using SIMD cooperative reduction (FP32 accumulation)
+    float thread_max = -INFINITY;
+    for (uint i = lane; i < reduce_size; i += 32) {
+        thread_max = max(thread_max, float(input[base + i * stride]));
+    }
+    float row_max = simd_max(thread_max);
+
+    // Pass 1 continued: Compute sum of exp(x - max) (FP32 accumulation)
+    float thread_sum = 0.0f;
+    for (uint i = lane; i < reduce_size; i += 32) {
+        thread_sum += exp(float(input[base + i * stride]) - row_max);
+    }
+    float row_sum = simd_sum(thread_sum);
+
+    // Pass 2: Normalize and write output
+    float inv_sum = 1.0f / row_sum;
+    for (uint i = lane; i < reduce_size; i += 32) {
+        output[base + i * stride] = half(exp(float(input[base + i * stride]) - row_max) * inv_sum);
+    }
+}
+
 // Single-pass log_softmax: output[i] = input[i] - max - log(sum_exp)
 kernel void log_softmax_online_fp32(
     device const float* input     [[buffer(0)]],

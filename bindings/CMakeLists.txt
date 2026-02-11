@@ -25,6 +25,8 @@ create_pybind11_module(
         metal_native_ops
         metal_native_interop
         metal_native_profiling
+        metal_native_future
+        metal_native_memory
 )
 
 # Python package files are in ../python/metal_native/

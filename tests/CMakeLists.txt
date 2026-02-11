@@ -71,10 +71,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/interop")
 endif()
 
 # Core-only tests (shape, dtype, error) - no ObjC framework dependencies
-file(GLOB CORE_TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/test_shape.cpp"
-                            "${CMAKE_CURRENT_SOURCE_DIR}/test_dtype.cpp"
-                            "${CMAKE_CURRENT_SOURCE_DIR}/test_error.cpp"
-                            "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_shape.cpp"
+# Use cpp/ versions only to avoid duplicate symbols
+file(GLOB CORE_TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_shape.cpp"
                             "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_dtype.cpp"
                             "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_error.cpp")
 if(CORE_TEST_SOURCES)
@@ -102,6 +100,8 @@ if(EXTENDED_TEST_SOURCES)
         PRIVATE
             metal_native_core
             metal_native_kernels
+            metal_native_memory
+            metal_native_dispatch
             GTest::gtest_main
     )
     apply_apple_silicon_flags(metal_native_extended_tests)

@@ -19,13 +19,13 @@
 
 ## Overview
 
-MetalNative is a high-performance deep learning framework built from the ground up for Apple Silicon. It provides native Metal GPU acceleration with custom MSL (Metal Shading Language) kernels, achieving **up to 5.8x faster** transformer inference compared to standard PyTorch MPS, while reducing memory usage by **up to 96.9%** through FlashAttention.
+MetalNative is a high-performance deep learning framework built from the ground up for Apple Silicon. It provides native Metal GPU acceleration with custom MSL (Metal Shading Language) kernels, achieving **up to 23.7x faster** fused operations (SwiGLU, RMSNorm, Softmax) compared to PyTorch MPS, while reducing memory usage by **up to 96.9%** through FlashAttention.
 
-> **Alpha Release** — The C++ backend and Metal shader pipeline are fully implemented. Python bindings are functional for core operations. See [Development Status](#development-status) for details.
+> **Alpha Release** — The C++ backend, Metal shader pipeline, and fused kernel operations are fully implemented with real benchmark validation. Python bindings are functional for core operations. See [Development Status](#development-status) for details.
 
 ## 개요
 
-MetalNative는 Apple Silicon을 위해 처음부터 설계된 고성능 딥러닝 프레임워크입니다. Metal GPU의 네이티브 가속과 커스텀 MSL(Metal Shading Language) 커널을 통해 표준 PyTorch MPS 대비 **최대 5.8배 빠른** 트랜스포머 추론 성능과 FlashAttention을 통한 **최대 96.9% 메모리 절감**을 달성합니다.
+MetalNative는 Apple Silicon을 위해 처음부터 설계된 고성능 딥러닝 프레임워크입니다. Metal GPU의 네이티브 가속과 커스텀 MSL(Metal Shading Language) 커널을 통해 표준 PyTorch MPS 대비 퓨전 연산(SwiGLU, RMSNorm, Softmax)에서 **최대 23.7배 빠른** 성능과 FlashAttention을 통한 **최대 96.9% 메모리 절감**을 달성합니다.
 
 ---
 
@@ -33,25 +33,43 @@ MetalNative는 Apple Silicon을 위해 처음부터 설계된 고성능 딥러�
 
 All benchmarks measured on **Apple M4 Max (36GB Unified Memory)** with PyTorch 2.10.0.
 
-<div align="center">
-<img src="docs/images/transformer_block.png" alt="Transformer Block Performance" width="700">
-</div>
+### Model-Based Per-Operation Benchmark
 
-### Transformer Block Inference
+MetalNative's custom Metal kernels vs PyTorch MPS, tested at real LLM dimensions (batch=1, seq_len=512, FP32).
 
-| Model Architecture | Standard MPS | MetalNative Optimized | Speedup | Throughput |
+**Speedup: MetalNative / PyTorch MPS** (higher = MetalNative faster)
+
+| Model | RMSNorm | SwiGLU | Softmax | QKV Proj | Out Proj | Gate+Up | Down Proj |
+|---|---|---|---|---|---|---|---|
+| **Qwen2.5-0.5B** (d=896) | **5.5x** | **6.6x** | **7.3x** | 0.76x | 0.81x | 0.75x | 0.92x |
+| **Qwen2.5-1.5B** (d=1536) | **5.6x** | **6.9x** | **6.7x** | 0.81x | 0.85x | 0.81x | 0.97x |
+| **Llama-3.2-3B** (d=3072) | **7.0x** | **9.6x** | **13.6x** | 0.82x | 0.86x | 0.79x | 0.98x |
+| **Qwen2.5-7B** (d=3584) | **6.3x** | **23.7x** | **13.9x** | 0.88x | 0.88x | 0.91x | 0.98x |
+
+> **Fused ops** (RMSNorm, SwiGLU, Softmax): Single custom Metal kernel replaces multiple PyTorch MPS operations → **5.5–23.7x faster**
+> **MatMul ops** (QKV, Out, Gate+Up, Down): Both use MPSGraph matmul hardware → near-parity (~0.9–1.0x)
+
+### Why the Speedup?
+
+| Operation | PyTorch MPS | MetalNative | Advantage |
+|---|---|---|---|
+| **RMSNorm** | pow → mean → rsqrt → mul (4 GPU dispatches) | Single fused kernel with SIMD reduction | Eliminates dispatch overhead |
+| **SwiGLU** | silu(x) → mul(x, gate) (2 dispatches + intermediate buffer) | Single kernel: SiLU + multiply in one pass | No intermediate allocation |
+| **Softmax** | max → subtract → exp → sum → divide (5 dispatches) | Online algorithm in single SIMD-parallel kernel | O(1) extra memory |
+| **MatMul** | MPSGraph matmul | MPSGraph matmul | Same hardware, ~parity |
+
+### Detailed Timings (ms)
+
+| Model | Op | MPS (ms) | MetalNative (ms) | Speedup |
 |---|---|---|---|---|
-| GPT2-Medium (d=1024, 16h) | 8.9ms | 2.8ms | **3.20x** | 184K tok/s |
-| GPT2-Large (d=1280, 20h) | 13.5ms | 3.9ms | **3.49x** | 132K tok/s |
-| Llama-7B Block (d=4096, 32h) | 119.4ms | 23.5ms | **5.09x** | 21.8K tok/s |
-| Kimi-K2.5 Block (d=7168, 64h) | 363.5ms | 62.2ms | **5.84x** | 8.2K tok/s |
-| Kimi-K2.5 1-Expert (d=7168, 64h) | 340.2ms | 28.3ms | **12.01x** | 18.1K tok/s |
-
-> Optimized configuration: RMSNorm + Fused QKV projection + SDPA FlashAttention + SwiGLU FFN
-
-<div align="center">
-<img src="docs/images/flash_attention_memory.png" alt="FlashAttention Memory Savings" width="700">
-</div>
+| **Qwen2.5-0.5B** | RMSNorm | 0.189 | 0.034 | 5.5x |
+| | SwiGLU | 0.272 | 0.041 | 6.6x |
+| | Softmax | 0.228 | 0.031 | 7.3x |
+| | Gate+Up Proj | 0.625 | 0.831 | 0.75x |
+| **Qwen2.5-7B** | RMSNorm | 0.204 | 0.032 | 6.3x |
+| | SwiGLU | 0.831 | 0.035 | 23.7x |
+| | Softmax | 0.369 | 0.026 | 13.9x |
+| | Gate+Up Proj | 6.840 | 7.488 | 0.91x |
 
 ### Flash Attention Memory Efficiency
 
@@ -62,43 +80,22 @@ All benchmarks measured on **Apple M4 Max (36GB Unified Memory)** with PyTorch 2
 | 1024 | 114 MB | 24 MB | 90 MB | 93.8% |
 | 2048 | 280 MB | 32 MB | 248 MB | **96.9%** |
 
-### MatMul Performance (FP32)
-
-| Matrix Size | CPU | Standard MPS | MetalNative | vs CPU |
-|---|---|---|---|---|
-| 512 x 512 | 0.11ms | 0.30ms | 0.25ms | 0.4x |
-| 1024 x 1024 | 0.70ms | 0.43ms | 0.41ms | 1.7x |
-| 2048 x 2048 | 5.95ms | 1.84ms | 1.77ms | 3.4x |
-| 4096 x 4096 | 45.23ms | 13.60ms | 12.80ms | **3.5x** |
-
-### Kimi-K2.5 Attention Scaling (64 heads, d_head=112)
-
-| Sequence Length | Standard Attention | SDPA (Flash) | Speedup | Memory Savings |
-|---|---|---|---|---|
-| 256 | 0.8ms | 0.6ms | 1.26x | — |
-| 512 | 2.1ms | 1.5ms | 1.33x | 34.4% |
-| 1024 | 7.4ms | 5.9ms | 1.27x | 67.2% |
-| 2048 | 29.4ms | 22.5ms | 1.31x | **83.6%** |
-
 <details>
 <summary><strong>Benchmark Methodology</strong></summary>
 
-- **Warmup:** 3 iterations (excluded from measurement)
-- **Measurement:** 10 iterations with trimmed mean (outliers removed)
-- **Synchronization:** `torch.mps.synchronize()` called after each GPU operation
-- **Mode:** Quick mode (`--quick` flag) with deterministic settings
-- **Comparison:** Standard PyTorch MPS vs MetalNative-optimized patterns (RMSNorm, SDPA, SwiGLU, fused QKV)
-- **Reproducibility:** Run `python benchmarks/benchmark_comprehensive.py --quick` to reproduce
+- **Hardware:** Apple M4 Max, 36GB Unified Memory
+- **Warmup:** 5 iterations (excluded from measurement)
+- **Measurement:** 20 iterations, median reported (reduces variance)
+- **Synchronization:** `torch.mps.synchronize()` / `_C.synchronize()` called before and after each timed iteration
+- **MetalNative mode:** Lazy commit enabled for fused ops (batches GPU commands like PyTorch MPS)
+- **Tensor creation:** Both frameworks use CPU→GPU copy for fair comparison (no zero-copy bias)
+- **Reproducibility:** `python benchmarks/benchmark_model_ops.py`
 
 </details>
 
 ### Real Model Benchmarks (HuggingFace Pretrained, 2024)
 
-End-to-end inference with **real pretrained weights** from HuggingFace — not synthetic data.
-
-<div align="center">
-<img src="docs/images/forward_latency.png" alt="Forward Pass Latency" width="700">
-</div>
+End-to-end inference with **real pretrained weights** from HuggingFace on PyTorch MPS.
 
 | Model | Params | Forward (FP16) | Generation | GPU Memory | vs CPU |
 |---|---|---|---|---|---|
@@ -107,16 +104,6 @@ End-to-end inference with **real pretrained weights** from HuggingFace — not s
 | **SmolLM2-1.7B** | 1.7B | 36.68ms | 56.2 tok/s | 3,264 MB | **4.94x** |
 | **Qwen2.5-3B** | 3B | 67.79ms | 35.8 tok/s | 5,886 MB | **4.72x** |
 | **Qwen2.5-7B** | 7B | 122.69ms | 19.1 tok/s | 14,526 MB | — |
-
-<div align="center">
-<img src="docs/images/throughput.png" alt="Generation Throughput" width="700">
-<br><br>
-<img src="docs/images/speedup_vs_cpu.png" alt="MPS vs CPU Speedup" width="700">
-<br><br>
-<img src="docs/images/memory_usage.png" alt="GPU Memory Usage" width="700">
-<br><br>
-<img src="docs/images/scaling.png" alt="Performance Scaling" width="700">
-</div>
 
 > **Conditions:** Apple M4 Max 36GB, PyTorch 2.10.0, input seq_len=64, generation=50 tokens, FP16.
 > All models are open-access (no authentication required) and released in 2024.
@@ -181,7 +168,7 @@ Components that participate in dynamic budgeting:
 
 | | MetalNative | MLX | PyTorch MPS |
 |---|---|---|---|
-| **Transformer Speedup** | **Up to 5.8x** | ~1.5x | 1x (baseline) |
+| **Fused Op Speedup** | **Up to 23.7x** | ~1.5x | 1x (baseline) |
 | **Memory Savings** | **Up to 96.9%** | Moderate | Baseline |
 | **API Style** | PyTorch-compatible | NumPy-like | PyTorch native |
 | **Metal Kernel Control** | Direct MSL access | Abstracted | Not supported |

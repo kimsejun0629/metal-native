@@ -17,6 +17,10 @@
 #include <metal_native/core/dtype.h>
 #include <metal_native/core/error.h>
 #include <metal_native/core/device.h>
+#include <metal_native/core/tensor.h>
+#include <metal_native/future/fast_ops.h>
+#include <metal_native/kernels/kernel_registry.h>
+#include <metal_native/dispatch/command_pipeline.h>
 
 namespace py = pybind11;
 using namespace metal_native;
@@ -38,9 +42,12 @@ py::dict device_properties();
 
 // Initialization
 void initialize();
+void load_library(const std::string& path);
 
 // Synchronization and memory management
 void synchronize();
+void set_lazy_commit(bool enable);
+bool lazy_commit();
 void empty_cache();
 size_t memory_allocated();
 size_t max_memory_allocated();
@@ -88,6 +95,36 @@ PYBIND11_MODULE(_C, m) {
 
     // Module version
     m.attr("__version__") = "0.1.0";
+
+    // ---------------------------------------------------------------------------
+    // MNTensor Class
+    // ---------------------------------------------------------------------------
+    py::class_<MNTensor, std::shared_ptr<MNTensor>>(m, "MNTensor")
+        .def("shape", [](const MNTensor& t) {
+            auto s = t.shape();
+            py::list result;
+            for (size_t i = 0; i < s.ndim(); ++i) {
+                result.append(s[i]);
+            }
+            return result;
+        })
+        .def("dtype", [](const MNTensor& t) {
+            return dtype_name(t.dtype());
+        })
+        .def("numel", &MNTensor::numel)
+        .def("ndim", &MNTensor::ndim)
+        .def("is_contiguous", &MNTensor::is_contiguous)
+        .def("__repr__", [](const MNTensor& t) {
+            return t.to_string();
+        });
+
+    // ---------------------------------------------------------------------------
+    // QKVResult Struct
+    // ---------------------------------------------------------------------------
+    py::class_<fast::QKVResult>(m, "QKVResult")
+        .def_readonly("q", &fast::QKVResult::q)
+        .def_readonly("k", &fast::QKVResult::k)
+        .def_readonly("v", &fast::QKVResult::v);
 
     // ---------------------------------------------------------------------------
     // Data Types
@@ -138,12 +175,20 @@ PYBIND11_MODULE(_C, m) {
     // ---------------------------------------------------------------------------
     m.def("initialize", &python::initialize,
           "Initialize metal_native runtime");
+    m.def("load_library", &python::load_library,
+          "Load Metal shader library from .metallib file",
+          py::arg("path"));
 
     // ---------------------------------------------------------------------------
     // Synchronization and Memory
     // ---------------------------------------------------------------------------
     m.def("synchronize", &python::synchronize,
           "Block until all GPU operations complete");
+    m.def("set_lazy_commit", &python::set_lazy_commit,
+          "Enable/disable lazy commit mode (batch ops like PyTorch MPS)",
+          py::arg("enable"));
+    m.def("lazy_commit", &python::lazy_commit,
+          "Check if lazy commit mode is enabled");
     m.def("empty_cache", &python::empty_cache,
           "Release cached GPU memory");
     m.def("memory_allocated", &python::memory_allocated,
@@ -301,11 +346,24 @@ py::dict device_properties() {
 }
 
 void initialize() {
-    // TODO: Initialize device, allocator, etc.
+    // Initialize device and load Metal shader library
+    MNDevice::instance(); // Ensure device is created
+}
+
+void load_library(const std::string& path) {
+    KernelRegistry::instance().load_library(path);
 }
 
 void synchronize() {
     MNDevice::instance().synchronize();
+}
+
+void set_lazy_commit(bool enable) {
+    MNDevice::instance().command_pipeline().set_lazy_commit(enable);
+}
+
+bool lazy_commit() {
+    return MNDevice::instance().command_pipeline().lazy_commit();
 }
 
 void empty_cache() {

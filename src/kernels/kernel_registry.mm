@@ -121,47 +121,113 @@ id<MTLComputePipelineState> KernelRegistry::get_pipeline(const std::string& name
 // ---------------------------------------------------------------------------
 
 void KernelRegistry::load_library(const std::string& path) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
 
-    @autoreleasepool {
-        NSString* ns_path = [NSString stringWithUTF8String:path.c_str()];
-        NSURL* url = [NSURL fileURLWithPath:ns_path];
-        NSError* error = nil;
+        @autoreleasepool {
+            NSString* ns_path = [NSString stringWithUTF8String:path.c_str()];
+            NSURL* url = [NSURL fileURLWithPath:ns_path];
+            NSError* error = nil;
 
-        impl_->library = [MNDevice::instance().metal_device()
-            newLibraryWithURL:url
-                        error:&error];
+            impl_->library = [MNDevice::instance().metal_device()
+                newLibraryWithURL:url
+                            error:&error];
 
-        MN_CHECK(impl_->library != nil,
-                 MetalNativeError::KernelCompilationFailed,
-                 "KernelRegistry: failed to load Metal library from '" +
-                 path + "': " +
-                 (error ? std::string([[error localizedDescription] UTF8String])
-                        : "file not found"));
+            MN_CHECK(impl_->library != nil,
+                     MetalNativeError::KernelCompilationFailed,
+                     "KernelRegistry: failed to load Metal library from '" +
+                     path + "': " +
+                     (error ? std::string([[error localizedDescription] UTF8String])
+                            : "file not found"));
+        }
+
+        // Clear cached pipelines when loading a new library.
+        impl_->pipelines.clear();
     }
 
-    // Clear cached pipelines when loading a new library.
-    impl_->pipelines.clear();
+    // Precompile all registered kernels asynchronously
+    precompile_pipelines();
 }
 
 void KernelRegistry::load_default_library() {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
 
-    @autoreleasepool {
-        NSError* error = nil;
-        impl_->library = [MNDevice::instance().metal_device()
-            newDefaultLibraryWithBundle:[NSBundle mainBundle]
-                                 error:&error];
+        @autoreleasepool {
+            NSError* error = nil;
+            impl_->library = [MNDevice::instance().metal_device()
+                newDefaultLibraryWithBundle:[NSBundle mainBundle]
+                                     error:&error];
 
-        MN_CHECK(impl_->library != nil,
-                 MetalNativeError::KernelCompilationFailed,
-                 "KernelRegistry: no default Metal library found in main bundle"
-                 + (error ? std::string(": ") +
-                    std::string([[error localizedDescription] UTF8String])
-                          : std::string()));
+            MN_CHECK(impl_->library != nil,
+                     MetalNativeError::KernelCompilationFailed,
+                     "KernelRegistry: no default Metal library found in main bundle"
+                     + (error ? std::string(": ") +
+                        std::string([[error localizedDescription] UTF8String])
+                              : std::string()));
+        }
+
+        impl_->pipelines.clear();
     }
 
-    impl_->pipelines.clear();
+    // Precompile all registered kernels asynchronously
+    precompile_pipelines();
+}
+
+// ---------------------------------------------------------------------------
+// Precompilation
+// ---------------------------------------------------------------------------
+
+void KernelRegistry::precompile_pipelines() {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+
+    if (impl_->library == nil) {
+        // No library loaded yet, nothing to precompile
+        return;
+    }
+
+    @autoreleasepool {
+        id<MTLDevice> device = MNDevice::instance().metal_device();
+
+        // Iterate over all registered kernels
+        for (const auto& entry : impl_->name_to_function) {
+            const std::string& entry_name = entry.first;
+            const std::string& entry_func = entry.second;
+
+            // Skip if already cached
+            if (impl_->pipelines.find(entry_name) != impl_->pipelines.end()) {
+                continue;
+            }
+
+            // Get the Metal function
+            NSString* ns_name = [NSString stringWithUTF8String:entry_func.c_str()];
+            id<MTLFunction> function = [impl_->library newFunctionWithName:ns_name];
+
+            if (function == nil) {
+                // Log warning but continue with other kernels
+                NSLog(@"KernelRegistry: warning: function '%s' not found during precompilation, skipping",
+                      entry_func.c_str());
+                continue;
+            }
+
+            // Copy for block capture (structured bindings cannot be captured in ObjC blocks)
+            std::string captured_func = entry_func;
+            std::string captured_name = entry_name;
+
+            // Compile asynchronously
+            [device newComputePipelineStateWithFunction:function
+                                      completionHandler:^(id<MTLComputePipelineState> pipeline, NSError* error) {
+                if (error != nil) {
+                    NSLog(@"KernelRegistry: warning: failed to precompile pipeline for '%s': %@",
+                          captured_func.c_str(), [error localizedDescription]);
+                } else if (pipeline != nil) {
+                    // Cache the compiled pipeline
+                    std::lock_guard<std::mutex> cache_lock(impl_->mutex);
+                    impl_->pipelines[captured_name] = pipeline;
+                }
+            }];
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -273,7 +273,7 @@ def main():
 
     # Transformer options
     parser.add_argument('--transformer-models', type=str, nargs='+',
-                       default=['GPT2-Small', 'GPT2-Medium'],
+                       default=['Qwen2.5-0.5B', 'Qwen2.5-1.5B'],
                        help='Transformer models to benchmark')
 
     args = parser.parse_args()

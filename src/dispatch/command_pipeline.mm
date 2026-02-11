@@ -26,6 +26,7 @@ struct CommandPipeline::Impl {
     mutable std::mutex      mu;
     id<MTLCommandBuffer>    active_buffer = nil;
     bool                    has_active    = false;
+    bool                    lazy_commit   = false;
 
     explicit Impl(MNDevice& dev, size_t count)
         : device(dev)
@@ -76,6 +77,11 @@ id<MTLCommandBuffer> CommandPipeline::current_buffer() {
 }
 
 void CommandPipeline::commit_and_continue() {
+    // In lazy mode, skip the commit — operations accumulate in the
+    // current buffer until synchronize() or flush() is called.
+    // This matches PyTorch MPS behavior of batching many ops per submit.
+    if (impl_->lazy_commit) return;
+
     // Acquire a backpressure slot BEFORE locking the mutex to prevent starvation.
     // If backpressure blocks (all slots full), we don't want to hold impl_->mu.
     impl_->backpressure.acquire();
@@ -163,6 +169,37 @@ size_t CommandPipeline::in_flight_count() const {
 
 size_t CommandPipeline::buffer_count() const noexcept {
     return impl_->buffer_count;
+}
+
+// ---------------------------------------------------------------------------
+// Lazy commit mode
+// ---------------------------------------------------------------------------
+
+void CommandPipeline::set_lazy_commit(bool enable) {
+    impl_->lazy_commit = enable;
+}
+
+bool CommandPipeline::lazy_commit() const noexcept {
+    return impl_->lazy_commit;
+}
+
+void CommandPipeline::flush() {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    if (!impl_->has_active) return;
+
+    impl_->backpressure.acquire();
+
+    id<MTLCommandBuffer> buf = impl_->active_buffer;
+    BackpressureController* bp = &impl_->backpressure;
+
+    [buf addCompletedHandler:^(id<MTLCommandBuffer> /*cb*/) {
+        bp->release();
+    }];
+
+    [buf commit];
+
+    // Create next buffer for continued encoding.
+    impl_->active_buffer = impl_->create_buffer();
 }
 
 } // namespace metal_native

@@ -118,7 +118,8 @@ MNTensor QuantWeightCache::get_dequantized(const std::string& name) {
 
         [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
         [encoder endEncoding];
-        cmd_pipeline.commit();
+        // OPT-5: Use commit_and_continue to allow command buffer reuse.
+        cmd_pipeline.commit_and_continue();
     }
 
     // Cache if budget allows

@@ -89,7 +89,8 @@ MNTensor embedding(const MNTensor& indices,
         [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
         [encoder endEncoding];
 
-        cmd_pipeline.commit();
+        // OPT-5: Use commit_and_continue to allow command buffer reuse.
+        cmd_pipeline.commit_and_continue();
     }
 
     return output;
@@ -178,7 +179,8 @@ MNTensor rope_embedding(const MNTensor& input,
         [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
         [encoder endEncoding];
 
-        cmd_pipeline.commit();
+        // OPT-5: Use commit_and_continue to allow command buffer reuse.
+        cmd_pipeline.commit_and_continue();
     }
 
     return output;

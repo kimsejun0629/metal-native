@@ -58,15 +58,20 @@ MNTensor dispatch_binary_op(const MNTensor& a,
         [encoder setBuffer:b.buffer()->metal_buffer() offset:b.offset() atIndex:1];
         [encoder setBuffer:output.buffer()->metal_buffer() offset:output.offset() atIndex:2];
 
-        // Dispatch one thread per output element
-        MTLSize grid_size = MTLSizeMake(numel, 1, 1);
+        // Pass num_elements to kernel (required at buffer(3))
+        uint32_t num_elements = static_cast<uint32_t>(numel);
+        [encoder setBytes:&num_elements length:sizeof(uint32_t) atIndex:3];
+
+        // Dispatch threads: kernel processes 4 elements per thread
+        MTLSize grid_size = MTLSizeMake((numel + 3) / 4, 1, 1);
         MTLSize threadgroup_size = MTLSizeMake(
             std::min<NSUInteger>(256, pipeline.maxTotalThreadsPerThreadgroup), 1, 1);
 
         [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
         [encoder endEncoding];
 
-        cmd_pipeline.commit();
+        // OPT-5: Use commit_and_continue to allow command buffer reuse.
+        cmd_pipeline.commit_and_continue();
     }
 
     return output;
@@ -106,14 +111,20 @@ MNTensor dispatch_unary_op(const MNTensor& x,
         [encoder setBuffer:x.buffer()->metal_buffer() offset:x.offset() atIndex:0];
         [encoder setBuffer:output.buffer()->metal_buffer() offset:output.offset() atIndex:1];
 
-        MTLSize grid_size = MTLSizeMake(numel, 1, 1);
+        // Pass num_elements to kernel (required at buffer(2))
+        uint32_t num_elements = static_cast<uint32_t>(numel);
+        [encoder setBytes:&num_elements length:sizeof(uint32_t) atIndex:2];
+
+        // Dispatch threads: kernel processes 4 elements per thread
+        MTLSize grid_size = MTLSizeMake((numel + 3) / 4, 1, 1);
         MTLSize threadgroup_size = MTLSizeMake(
             std::min<NSUInteger>(256, pipeline.maxTotalThreadsPerThreadgroup), 1, 1);
 
         [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
         [encoder endEncoding];
 
-        cmd_pipeline.commit();
+        // OPT-5: Use commit_and_continue to allow command buffer reuse.
+        cmd_pipeline.commit_and_continue();
     }
 
     return output;
@@ -183,14 +194,20 @@ MNTensor sqrt(const MNTensor& x, MNDevice& device) {
         [encoder setBuffer:x.buffer()->metal_buffer() offset:x.offset() atIndex:0];
         [encoder setBuffer:output.buffer()->metal_buffer() offset:output.offset() atIndex:1];
 
-        MTLSize grid_size = MTLSizeMake(numel, 1, 1);
+        // Pass num_elements to kernel (required at buffer(2))
+        uint32_t num_elements = static_cast<uint32_t>(numel);
+        [encoder setBytes:&num_elements length:sizeof(uint32_t) atIndex:2];
+
+        // Dispatch threads: kernel processes 4 elements per thread
+        MTLSize grid_size = MTLSizeMake((numel + 3) / 4, 1, 1);
         MTLSize threadgroup_size = MTLSizeMake(
             std::min<NSUInteger>(256, pipeline.maxTotalThreadsPerThreadgroup), 1, 1);
 
         [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
         [encoder endEncoding];
 
-        cmd_pipeline.commit();
+        // OPT-5: Use commit_and_continue to allow command buffer reuse.
+        cmd_pipeline.commit_and_continue();
     }
 
     return output;
@@ -241,14 +258,20 @@ MNTensor clamp(const MNTensor& x, float min_val, float max_val, MNDevice& device
         float bounds[2] = {min_val, max_val};
         [encoder setBytes:&bounds length:sizeof(bounds) atIndex:2];
 
-        MTLSize grid_size = MTLSizeMake(numel, 1, 1);
+        // Pass num_elements to kernel (required at buffer(3))
+        uint32_t num_elements = static_cast<uint32_t>(numel);
+        [encoder setBytes:&num_elements length:sizeof(uint32_t) atIndex:3];
+
+        // Dispatch threads: kernel processes 4 elements per thread
+        MTLSize grid_size = MTLSizeMake((numel + 3) / 4, 1, 1);
         MTLSize threadgroup_size = MTLSizeMake(
             std::min<NSUInteger>(256, pipeline.maxTotalThreadsPerThreadgroup), 1, 1);
 
         [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
         [encoder endEncoding];
 
-        cmd_pipeline.commit();
+        // OPT-5: Use commit_and_continue to allow command buffer reuse.
+        cmd_pipeline.commit_and_continue();
     }
 
     return output;
@@ -308,7 +331,8 @@ MNTensor where(const MNTensor& condition,
         [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
         [encoder endEncoding];
 
-        cmd_pipeline.commit();
+        // OPT-5: Use commit_and_continue to allow command buffer reuse.
+        cmd_pipeline.commit_and_continue();
     }
 
     return output;

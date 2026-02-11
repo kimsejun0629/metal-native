@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #ifdef __OBJC__
@@ -88,6 +89,19 @@ public:
     /// @return         A zero-copy MNBuffer backed by the supplied memory.
     static std::unique_ptr<MNBuffer> create_zero_copy(
         MNDevice& device, void* cpu_ptr, size_t size);
+
+    /// Wrap an externally-owned pointer as an MNBuffer (zero-copy).
+    /// The caller is responsible for keeping the external memory alive.
+    /// @param device  The Metal device.
+    /// @param data_ptr  CPU-accessible pointer to existing MTLBuffer contents.
+    /// @param size  Size in bytes.
+    /// @param release_callback  Optional callback invoked when the buffer is destroyed.
+    /// @return Shared pointer to the wrapping buffer.
+    static std::shared_ptr<MNBuffer> wrap_external(
+        MNDevice& device,
+        void* data_ptr,
+        size_t size,
+        std::function<void()> release_callback = nullptr);
 
 private:
     /// Default constructor used only by create_zero_copy.

@@ -36,6 +36,11 @@ enum class OpType : uint8_t {
     LayerNorm,
     Add,
     Mul,
+    SiLU,
+    RMSNorm,
+    RoPE,
+    SwiGLU,
+    Residual,
 };
 
 /// Convert OpType to human-readable string.

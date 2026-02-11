@@ -7,6 +7,53 @@ using namespace metal;
 // Tile size constant
 constant constexpr uint TILE_SIZE = 16;
 
+// Threadgroup memory budget: 32KB = 32768 bytes
+// Apple Silicon has a 32KB limit per threadgroup for threadgroup memory.
+// Memory calculations by tile size and precision:
+//
+// tile16 + head_dim=128 + FP32:
+//   shared_Q:      16 * 128 * 4 =  8,192 bytes
+//   shared_KV:     16 * 128 * 4 =  8,192 bytes (aliased for K then V)
+//   shared_scores: 16 * 16  * 4 =  1,024 bytes
+//   shared_output: 16 * 128 * 4 =  8,192 bytes
+//   TOTAL:                        25,600 bytes (OK, fits in 32KB)
+//
+// tile16 + head_dim=128 + FP16:
+//   shared_Q:      16 * 128 * 2 =  4,096 bytes
+//   shared_KV:     16 * 128 * 2 =  4,096 bytes
+//   shared_scores: 16 * 16  * 4 =  1,024 bytes (FP32 for numerical stability)
+//   shared_output: 16 * 128 * 4 =  8,192 bytes (FP32 accumulation)
+//   TOTAL:                        17,408 bytes (OK, fits in 32KB)
+//
+// tile24 + head_dim=128 + FP16:
+//   shared_Q:      24 * 128 * 2 =  6,144 bytes
+//   shared_KV:     24 * 128 * 2 =  6,144 bytes
+//   shared_scores: 24 * 24  * 4 =  2,304 bytes
+//   shared_output: 24 * 128 * 4 = 12,288 bytes
+//   temp buffers:  24 * 24  * 2 =  1,152 bytes (temp_scores_half)
+//                  24 * 24  * 2 =  1,152 bytes (temp_weights_half)
+//   TOTAL:                        29,184 bytes (OK, tight but fits)
+//
+// tile32 + head_dim=128 + FP16: EXCEEDS 32KB - DO NOT USE
+//   shared_Q:      32 * 128 * 2 =  8,192 bytes
+//   shared_KV:     32 * 128 * 2 =  8,192 bytes
+//   shared_scores: 32 * 32  * 4 =  4,096 bytes
+//   shared_output: 32 * 128 * 4 = 16,384 bytes
+//   temp buffers:  32 * 32  * 2 =  2,048 bytes (temp_scores_half)
+//                  32 * 32  * 2 =  2,048 bytes (temp_weights_half)
+//   TOTAL:                        40,960 bytes (EXCEEDS 32KB limit!)
+//
+// tile32 + head_dim=64 + FP16:
+//   shared_Q:      32 * 64  * 2 =  4,096 bytes
+//   shared_KV:     32 * 64  * 2 =  4,096 bytes
+//   shared_scores: 32 * 32  * 4 =  4,096 bytes
+//   shared_output: 32 * 64  * 4 =  8,192 bytes
+//   temp buffers:  32 * 32  * 2 =  2,048 bytes (temp_scores_half)
+//                  32 * 32  * 2 =  2,048 bytes (temp_weights_half)
+//   TOTAL:                        24,576 bytes (OK, fits in 32KB)
+//
+// CONSTRAINT: tile32 variant (if added) must only be used when head_dim <= 64
+
 /// Online softmax state for numerically stable softmax computation
 struct OnlineSoftmaxState {
     float max_val;

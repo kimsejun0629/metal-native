@@ -397,3 +397,312 @@ kernel void group_norm_kernel_fp16(
         output[idx] = half(normalized * float(weight[channel_idx]) + float(bias[channel_idx]));
     }
 }
+
+// ============================================================================
+// VECTORIZED KERNELS (Task 1.2)
+// ============================================================================
+// These kernels use float4/half4 vectorized loads and threadgroup memory caching
+// for improved memory bandwidth utilization on large norm_size (>= 128).
+//
+// Key optimizations:
+// 1. float4/half4 loads: 4x elements per memory transaction
+// 2. Threadgroup caching: Second pass reads from fast threadgroup memory instead of device memory
+// 3. Efficient tail handling: Scalar loads for remainder elements
+//
+// Constraints:
+// - Threadgroup memory limit: 32KB per threadgroup
+// - norm_size * sizeof(float) must be <= 32KB
+// - For norm_size > 8192, dispatcher falls back to non-cached kernels
+// ============================================================================
+
+kernel void layer_norm_vec_fp32(
+    device const float* input [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& batch_size [[buffer(4)]],
+    constant uint& norm_size [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    threadgroup float* shared_input [[threadgroup(0)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = gid.y;
+    if (batch_idx >= batch_size) return;
+
+    const uint base_offset = batch_idx * norm_size;
+
+    // Number of float4 vectors and remainder elements
+    const uint vec_count = norm_size / 4;
+    const uint remainder = norm_size % 4;
+
+    // Pass 1: Cooperative statistics with float4 loads + threadgroup caching
+    float partial_sum = 0.0f;
+    float partial_sq_sum = 0.0f;
+
+    // Vectorized loads (4 elements at once)
+    for (uint i = lane; i < vec_count; i += 32) {
+        float4 val = *reinterpret_cast<const device float4*>(input + base_offset + i * 4);
+
+        // Cache in threadgroup memory for Pass 2
+        *reinterpret_cast<threadgroup float4*>(shared_input + i * 4) = val;
+
+        partial_sum += val.x + val.y + val.z + val.w;
+        partial_sq_sum += dot(val, val);
+    }
+
+    // Handle remainder elements (scalar)
+    uint rem_start = vec_count * 4;
+    if (lane < remainder) {
+        float val = input[base_offset + rem_start + lane];
+        shared_input[rem_start + lane] = val;
+        partial_sum += val;
+        partial_sq_sum += val * val;
+    }
+
+    // SIMD reduction
+    float total_sum = simd_sum(partial_sum);
+    float total_sq_sum = simd_sum(partial_sq_sum);
+
+    float mean = total_sum / float(norm_size);
+    float variance = total_sq_sum / float(norm_size) - mean * mean;
+    float inv_std = 1.0f / sqrt(max(variance, 0.0f) + eps);
+
+    // Ensure all threads have cached their data
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Pass 2: Normalize using cached data + vectorized store
+    for (uint i = lane; i < vec_count; i += 32) {
+        float4 val = *reinterpret_cast<const threadgroup float4*>(shared_input + i * 4);
+        float4 w = *reinterpret_cast<const device float4*>(weight + i * 4);
+        float4 b = *reinterpret_cast<const device float4*>(bias + i * 4);
+
+        float4 normalized = (val - mean) * inv_std;
+        float4 result = normalized * w + b;
+
+        *reinterpret_cast<device float4*>(output + base_offset + i * 4) = result;
+    }
+
+    // Handle remainder
+    if (lane < remainder) {
+        uint idx = rem_start + lane;
+        float val = shared_input[idx];
+        float normalized = (val - mean) * inv_std;
+        output[base_offset + idx] = normalized * weight[idx] + bias[idx];
+    }
+}
+
+kernel void layer_norm_vec_fp16(
+    device const half* input [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device const half* bias [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& batch_size [[buffer(4)]],
+    constant uint& norm_size [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    threadgroup float* shared_input [[threadgroup(0)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = gid.y;
+    if (batch_idx >= batch_size) return;
+
+    const uint base_offset = batch_idx * norm_size;
+
+    // Number of half4 vectors and remainder elements
+    const uint vec_count = norm_size / 4;
+    const uint remainder = norm_size % 4;
+
+    // Pass 1: Cooperative statistics with half4 loads + threadgroup caching (FP32 accumulation)
+    float partial_sum = 0.0f;
+    float partial_sq_sum = 0.0f;
+
+    // Vectorized loads (4 elements at once), convert to float for accumulation
+    for (uint i = lane; i < vec_count; i += 32) {
+        half4 val_h = *reinterpret_cast<const device half4*>(input + base_offset + i * 4);
+        float4 val = float4(val_h);
+
+        // Cache in threadgroup memory (as float for numerical stability)
+        *reinterpret_cast<threadgroup float4*>(shared_input + i * 4) = val;
+
+        partial_sum += val.x + val.y + val.z + val.w;
+        partial_sq_sum += dot(val, val);
+    }
+
+    // Handle remainder elements (scalar)
+    uint rem_start = vec_count * 4;
+    if (lane < remainder) {
+        float val = float(input[base_offset + rem_start + lane]);
+        shared_input[rem_start + lane] = val;
+        partial_sum += val;
+        partial_sq_sum += val * val;
+    }
+
+    // SIMD reduction
+    float total_sum = simd_sum(partial_sum);
+    float total_sq_sum = simd_sum(partial_sq_sum);
+
+    float mean = total_sum / float(norm_size);
+    float variance = total_sq_sum / float(norm_size) - mean * mean;
+    float inv_std = 1.0f / sqrt(max(variance, 0.0f) + eps);
+
+    // Ensure all threads have cached their data
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Pass 2: Normalize using cached data + vectorized store
+    for (uint i = lane; i < vec_count; i += 32) {
+        float4 val = *reinterpret_cast<const threadgroup float4*>(shared_input + i * 4);
+        float4 w = float4(*reinterpret_cast<const device half4*>(weight + i * 4));
+        float4 b = float4(*reinterpret_cast<const device half4*>(bias + i * 4));
+
+        float4 normalized = (val - mean) * inv_std;
+        float4 result = normalized * w + b;
+
+        *reinterpret_cast<device half4*>(output + base_offset + i * 4) = half4(result);
+    }
+
+    // Handle remainder
+    if (lane < remainder) {
+        uint idx = rem_start + lane;
+        float val = shared_input[idx];
+        float normalized = (val - mean) * inv_std;
+        output[base_offset + idx] = half(normalized * float(weight[idx]) + float(bias[idx]));
+    }
+}
+
+kernel void rms_norm_vec_fp32(
+    device const float* input [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& batch_size [[buffer(3)]],
+    constant uint& norm_size [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    threadgroup float* shared_input [[threadgroup(0)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = gid.y;
+    if (batch_idx >= batch_size) return;
+
+    const uint base_offset = batch_idx * norm_size;
+
+    // Number of float4 vectors and remainder elements
+    const uint vec_count = norm_size / 4;
+    const uint remainder = norm_size % 4;
+
+    // Pass 1: Cooperative RMS computation with float4 loads + threadgroup caching
+    float partial_sq_sum = 0.0f;
+
+    // Vectorized loads (4 elements at once)
+    for (uint i = lane; i < vec_count; i += 32) {
+        float4 val = *reinterpret_cast<const device float4*>(input + base_offset + i * 4);
+
+        // Cache in threadgroup memory for Pass 2
+        *reinterpret_cast<threadgroup float4*>(shared_input + i * 4) = val;
+
+        partial_sq_sum += dot(val, val);
+    }
+
+    // Handle remainder elements (scalar)
+    uint rem_start = vec_count * 4;
+    if (lane < remainder) {
+        float val = input[base_offset + rem_start + lane];
+        shared_input[rem_start + lane] = val;
+        partial_sq_sum += val * val;
+    }
+
+    // SIMD reduction
+    float total_sq_sum = simd_sum(partial_sq_sum);
+
+    float rms = sqrt(total_sq_sum / float(norm_size) + eps);
+    float inv_rms = 1.0f / rms;
+
+    // Ensure all threads have cached their data
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Pass 2: Normalize using cached data + vectorized store
+    for (uint i = lane; i < vec_count; i += 32) {
+        float4 val = *reinterpret_cast<const threadgroup float4*>(shared_input + i * 4);
+        float4 w = *reinterpret_cast<const device float4*>(weight + i * 4);
+
+        float4 result = val * inv_rms * w;
+
+        *reinterpret_cast<device float4*>(output + base_offset + i * 4) = result;
+    }
+
+    // Handle remainder
+    if (lane < remainder) {
+        uint idx = rem_start + lane;
+        float val = shared_input[idx];
+        output[base_offset + idx] = val * inv_rms * weight[idx];
+    }
+}
+
+kernel void rms_norm_vec_fp16(
+    device const half* input [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant uint& batch_size [[buffer(3)]],
+    constant uint& norm_size [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    threadgroup float* shared_input [[threadgroup(0)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = gid.y;
+    if (batch_idx >= batch_size) return;
+
+    const uint base_offset = batch_idx * norm_size;
+
+    // Number of half4 vectors and remainder elements
+    const uint vec_count = norm_size / 4;
+    const uint remainder = norm_size % 4;
+
+    // Pass 1: Cooperative RMS computation with half4 loads + threadgroup caching (FP32 accumulation)
+    float partial_sq_sum = 0.0f;
+
+    // Vectorized loads (4 elements at once), convert to float for accumulation
+    for (uint i = lane; i < vec_count; i += 32) {
+        half4 val_h = *reinterpret_cast<const device half4*>(input + base_offset + i * 4);
+        float4 val = float4(val_h);
+
+        // Cache in threadgroup memory (as float for numerical stability)
+        *reinterpret_cast<threadgroup float4*>(shared_input + i * 4) = val;
+
+        partial_sq_sum += dot(val, val);
+    }
+
+    // Handle remainder elements (scalar)
+    uint rem_start = vec_count * 4;
+    if (lane < remainder) {
+        float val = float(input[base_offset + rem_start + lane]);
+        shared_input[rem_start + lane] = val;
+        partial_sq_sum += val * val;
+    }
+
+    // SIMD reduction
+    float total_sq_sum = simd_sum(partial_sq_sum);
+
+    float rms = sqrt(total_sq_sum / float(norm_size) + eps);
+    float inv_rms = 1.0f / rms;
+
+    // Ensure all threads have cached their data
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Pass 2: Normalize using cached data + vectorized store
+    for (uint i = lane; i < vec_count; i += 32) {
+        float4 val = *reinterpret_cast<const threadgroup float4*>(shared_input + i * 4);
+        float4 w = float4(*reinterpret_cast<const device half4*>(weight + i * 4));
+
+        float4 result = val * inv_rms * w;
+
+        *reinterpret_cast<device half4*>(output + base_offset + i * 4) = half4(result);
+    }
+
+    // Handle remainder
+    if (lane < remainder) {
+        uint idx = rem_start + lane;
+        float val = shared_input[idx];
+        output[base_offset + idx] = half(val * inv_rms * float(weight[idx]));
+    }
+}

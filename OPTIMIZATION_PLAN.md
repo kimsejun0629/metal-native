@@ -2,6 +2,22 @@
 
 > Apple M4 Max | 36GB | PyTorch 2.8.0 기준 분석
 > 생성일: 2026-02-11
+> 상세 실행 계획: `.omc/plans/flashattention-compute-optimization.md` (Plan v3)
+
+---
+
+## Recent Updates (2026-02-11)
+
+**Status Corrections:**
+1. **Normalization 커널**: LayerNorm, BatchNorm, GroupNorm 모두 이미 32-thread SIMD-cooperative reduction 사용 중 (OPT-3 수정)
+2. **Softmax 디스패처**: 이미 단일 패스 온라인 알고리즘 사용 중. 3-pass 커널은 dead code (OPT-8 수정)
+
+**Bug Discoveries:**
+1. **Elementwise OOB 버그**: `num_elements` 파라미터가 Metal 커널에 전달되지 않아 메모리 오버런 발생 (현재 수정 중)
+
+**Performance Bottlenecks Identified:**
+1. **LayerNorm 큰 텐서**: norm_size >= 2048에서 단일 threadgroup 사용으로 GPU 점유율 ~0.3% (MPS 대비 2.1x 느림)
+2. **Softmax 순차 처리**: 온라인 커널이 reduce_size 전체를 단일 스레드로 처리 (SIMD 병렬화 없음)
 
 ---
 
@@ -19,29 +35,29 @@ MetalNative에는 **정합성 버그 4건**, **핵심 성능 병목 7건**, **�
 
 ## Phase 0: 긴급 버그 수정 (P0 - Critical)
 
-### BUG-1: Softmax SIMD Reduction 정합성 버그
+### BUG-1: Softmax SIMD Reduction 정합성 버그 [RESOLVED]
 - **파일**: `shaders/softmax_kernel.metal:37-42, 74-80`
 - **문제**: 각 스레드가 독립적으로 자기 row의 max/sum을 계산하지만, `simd_max_reduce`/`simd_sum_reduce`가 **서로 다른 row**의 결과끼리 reduce. Lane 0만 write하므로 31/32 출력값이 유실됨.
-- **수정**: 그리드를 1D로 변경하여 threadgroup이 하나의 row를 협력 처리하거나, SIMD reduction을 제거하고 각 스레드가 자기 결과를 직접 write.
-- **영향**: 정합성 수정 (현재 결과가 틀림)
+- **수정**: ✅ 이미 수정됨 - 현재 코드는 SIMD reduction을 사용하지 않고, 각 스레드가 독립적으로 자기 결과를 직접 write (line 35, 67).
+- **영향**: 정합성 확보됨
 
-### BUG-2: Attention head_dim > 32 버퍼 오버플로우
+### BUG-2: Attention head_dim > 32 버퍼 오버플로우 [RESOLVED]
 - **파일**: `shaders/attention_kernel.metal:86`
 - **문제**: `float acc[32]`로 고정. head_dim=64/128(현대 모든 모델)에서 out-of-bounds write.
-- **수정**: 동적 크기 또는 template specialization per head_dim.
-- **영향**: Silent data corruption 방지
+- **수정**: ✅ 이미 수정됨 - 현재 코드는 threadgroup memory를 사용하여 동적 head_dim을 지원함.
+- **영향**: Data corruption 방지됨
 
-### BUG-3: Attention threadgroup 메모리 32KB 초과
+### BUG-3: Attention threadgroup 메모리 32KB 초과 [RESOLVED]
 - **파일**: `src/ops/attention.mm:133-134`
 - **문제**: head_dim=128 FP32에서 `3*32*128*4 + 32*32*4 = 53KB` → Apple Silicon 32KB 한도 초과.
-- **수정**: TILE_SIZE를 16으로 축소하거나 head_dim을 타일링.
-- **영향**: GPU fault 방지
+- **수정**: ✅ 이미 수정됨 - 현재 코드는 TILE_SIZE=16을 사용하여 32KB 이내로 유지함 (attention_kernel.metal:8).
+- **영향**: GPU fault 방지됨
 
-### BUG-4: commit_and_continue 활성도/기아(liveness/starvation) 위험
+### BUG-4: commit_and_continue 활성도/기아(liveness/starvation) 위험 [RESOLVED]
 - **파일**: `src/dispatch/command_pipeline.mm:78-100`
 - **문제**: `impl_->mu` mutex를 잡은 상태에서 `backpressure.acquire()` 블로킹 호출. Backpressure `release()`는 자체 mutex를 사용하므로 classic deadlock은 아니나, `current_buffer()` 등 `impl_->mu`가 필요한 다른 스레드가 블로킹되어 convoy/starvation 발생.
-- **수정**: backpressure acquire를 mutex 획득 **전**으로 이동.
-- **영향**: 스레드 기아 및 convoy 방지
+- **수정**: ✅ 이미 수정됨 - 현재 코드는 backpressure acquire를 mutex 획득 **전**에 수행함 (line 79-83, 103-107).
+- **영향**: 스레드 기아 및 convoy 방지됨
 
 ---
 
@@ -71,15 +87,15 @@ MetalNative에는 **정합성 버그 4건**, **핵심 성능 병목 7건**, **�
 
 ### OPT-3: Normalization 커널 병렬화
 - **현재**:
-  - LayerNorm: 단일 스레드 Welford loop (`normalization_kernel.metal:53-55`)
-  - BatchNorm: threadgroup (1,1,1) 디스패치 (`normalization.mm:220`)
-  - GroupNorm: threadgroup (1,1,1) 디스패치 (`normalization.mm:328`)
-- **목표**: SIMD-cooperative 통계 계산
+  - LayerNorm: ✅ **이미 32-thread SIMD-cooperative reduction 사용** (`normalization.mm:83-97`, simd_sum() 활용)
+    - 단, 큰 텐서(norm_size >= 2048)에서 GPU 점유율 저하 문제 있음 (단일 threadgroup만 사용)
+  - BatchNorm: 32-thread SIMD-cooperative (`normalization.mm:233`)
+  - GroupNorm: 32-thread SIMD-cooperative (`normalization.mm:338`)
+- **목표**: 큰 텐서에서 다중 threadgroup 병렬화 (현재 점유율 ~0.3%)
 - **방법**:
-  - 32 스레드가 norm_size를 stride로 분할 → 부분 통계 → `simd_sum`으로 결합
-  - BatchNorm: batch*spatial 차원에 걸쳐 병렬화
-  - GroupNorm: 동일 패턴 적용
-- **예상 효과**: LayerNorm **32x**, BatchNorm/GroupNorm **100-1000x 속도 향상**
+  - LayerNorm의 큰 텐서(>= 2048)에 대해 배치별 다중 threadgroup 사용
+  - 현재는 MPS 폴백으로 우회 중 (`normalization.mm:46-49`)
+- **예상 효과**: 큰 텐서에서 **2-3x 속도 향상** (MPS 대비 동등/우수 수준 달성)
 
 ### OPT-4: MPSGraph 캐시 연결
 - **현재**: 매 호출마다 새 MPSGraph 생성 (`matmul.mm:67`, `conv.mm:68`)
@@ -111,29 +127,32 @@ MetalNative에는 **정합성 버그 4건**, **핵심 성능 병목 7건**, **�
 - **방법**: `device const float4*` 캐스팅으로 4요소씩 처리 + tail handling
 - **예상 효과**: **2-4x 속도 향상**
 - **적용 대상**: 26개 elementwise 커널 + flat copy
+- **⚠️ 알려진 버그**: Elementwise 디스패치에서 `num_elements` 파라미터가 Metal 커널에 전달되지 않아 OOB 메모리 접근 발생. 현재 최적화 사이클에서 수정 중.
 
-### OPT-7: Softmax 단일 패스 온라인 알고리즘
-- **현재**: 3-pass (find_max → exp_sum → normalize), 3개 별도 커널 디스패치
-- **목표**: attention 커널 내부에 이미 있는 online softmax 패턴 재활용
-- **예상 효과**: **2-3x 속도 향상** (대역폭 절반 + 임시 버퍼 제거)
+### OPT-8: Softmax 온라인 알고리즘 병렬화
+- **현재**: ✅ **이미 단일 패스 온라인 알고리즘 사용** (`softmax.mm:62-69`, `softmax_online_fp32`/`softmax_online_fp16`)
+  - 3-pass 커널(`softmax_find_max`, `softmax_exp_sum`, `softmax_normalize`)은 .metal 파일에 정의되어 있으나 **사용되지 않는 dead code**
+- **실제 병목**: 온라인 커널이 전체 reduce_size를 단일 스레드로 순차 처리 (SIMD 병렬화 없음)
+- **목표**: 다중 스레드로 reduce_size 분할 및 SIMD-cooperative reduction
+- **예상 효과**: **32-256x 속도 향상** (reduction 커널과 유사한 패턴)
 
-### OPT-8: 메모리 할당기 중간 크기 클래스
+### OPT-9: 메모리 할당기 중간 크기 클래스
 - **현재**: 순수 power-of-2 버킷팅 → 최대 49.99% 내부 단편화
 - **방법**: 1.5x 중간 클래스 추가 (16KB, 24KB, 32KB, 48KB, 64KB, 96KB...)
 - **예상 효과**: 피크 GPU 메모리 **15-25% 절감**
 
-### OPT-9: MTLHazardTrackingModeUntracked 설정
+### OPT-10: MTLHazardTrackingModeUntracked 설정
 - **파일**: `src/memory/heap_manager.mm:141-142`
 - **방법**: Placement heap에 `desc.hazardTrackingMode = MTLHazardTrackingModeUntracked` (1줄 변경)
 - **전제**: EventManager로 이미 동기화 관리 중
 - **예상 효과**: GPU 처리량 **3-8% 향상**
 
-### OPT-10: Worker Thread drain 최적화
+### OPT-11: Worker Thread drain 최적화
 - **현재**: 매 task 완료 후 mutex 재획득하여 queue.empty() 확인
 - **방법**: `std::atomic<bool> drain_requested` 플래그 추가
 - **예상 효과**: 소규모 커널 집약 워크로드에서 **5-15% 처리량 향상**
 
-### OPT-11: 중간 텐서 StorageMode::Private 기본값
+### OPT-12: 중간 텐서 StorageMode::Private 기본값
 - **현재**: 모든 할당이 `Shared` 모드 (CPU 페이지 테이블 매핑 유지)
 - **방법**: GPU 전용 중간 텐서를 `Private` 모드로 변경
 - **예상 효과**: TLB 압력 감소로 **2-10% 처리량 향상**
@@ -142,7 +161,7 @@ MetalNative에는 **정합성 버그 4건**, **핵심 성능 병목 7건**, **�
 
 ## Phase 3: 그래프 최적화 & 커널 퓨전 (1-2개월)
 
-### OPT-12: Fusion 패턴 연결 및 확장
+### OPT-13: Fusion 패턴 연결 및 확장
 - **현재**: 7개 패턴 등록됨 (`fusion_patterns.mm:132-197`) 그러나 **실행 경로 미연결**
 - **추가할 패턴**:
   | 패턴 | 설명 | 예상 속도 향상 |
@@ -154,7 +173,7 @@ MetalNative에는 **정합성 버그 4건**, **핵심 성능 병목 7건**, **�
   | SiLU + Gate (Llama/Mistral) | `SiLU(x_gate) * x_up` | 2x |
   | Attention + Dropout | 학습용 | 1.1x |
 
-### OPT-13: Shape Bucketing 완성
+### OPT-14: Shape Bucketing 완성
 - **현재**: `pad_tensor()`, `slice_tensor()` → NotImplemented 예외
 - **방법**: MPSGraph `padTensorWithTensor:paddingMode:` 활용
 - **차원별 전략**:
@@ -163,11 +182,11 @@ MetalNative에는 **정합성 버그 4건**, **핵심 성능 병목 7건**, **�
   - Hidden: 이미 정렬된 경우 버킷팅 생략
 - **예상 효과**: 그래프 컴파일 **20-50% 감소**
 
-### OPT-14: L2 디스크 캐시 키 충돌 수정
+### OPT-15: L2 디스크 캐시 키 충돌 수정
 - **현재**: `topology_hash`만으로 디스크 경로 생성 → 다른 shape의 그래프가 서로 덮어씀
 - **수정**: `shape_tuple` 해시 + `dtype`을 파일명에 포함
 
-### OPT-15: Lazy Evaluation 아키텍처 (MLX 영감)
+### OPT-16: Lazy Evaluation 아키텍처 (MLX 영감)
 - **MLX 핵심 장점**: 계산 그래프를 실행과 분리 → 전역 최적화 패스 적용
 - **MetalNative 적용**:
   1. Operation을 즉시 실행하지 않고 그래프에 기록
@@ -180,24 +199,24 @@ MetalNative에는 **정합성 버그 4건**, **핵심 성능 병목 7건**, **�
 
 ## Phase 4: 차세대 하드웨어 대응 (3-6개월)
 
-### OPT-16: Metal 4 마이그레이션
+### OPT-17: Metal 4 마이그레이션
 - `MTLTensor` 네이티브 텐서 타입 채택
 - `MTL4ArgumentTable`로 효율적 리소스 바인딩
 - `MTL4MachineLearningCommandEncoder`로 ML 전용 인코더
 - Residency sets로 커널/버퍼 사전 로딩
 - Shader precompilation via MTL4Compiler
 
-### OPT-17: BFloat16 지원
+### OPT-18: BFloat16 지원
 - M4 Max 하드웨어 지원 확인
 - FP32 동적 범위 + FP16 처리량 → 학습 안정성
 - `AMPController`에 BF16 정책 추가
 
-### OPT-18: M5 Neural Accelerator 대응 (Metal 4 TensorOps 경유)
+### OPT-19: M5 Neural Accelerator 대응 (Metal 4 TensorOps 경유)
 - Metal FlashAttention v2.5: **4.6x 성능 향상** 보고
 - 전용 matmul, attention, segmented matmul 연산
 - M5 칩 대상 최적화 경로
 
-### OPT-19: `metal_native.fast` 모듈 (MLX 영감)
+### OPT-20: `metal_native.fast` 모듈 (MLX 영감)
 - 고도 최적화된 퓨전 커널 라이브러리:
   - `fast.rms_norm()` - 퓨전 RMSNorm
   - `fast.layer_norm()` - 퓨전 LayerNorm
@@ -210,32 +229,33 @@ MetalNative에는 **정합성 버그 4건**, **핵심 성능 병목 7건**, **�
 
 ## 우선순위 종합 매트릭스
 
-| 순위 | 항목 | 노력 | 예상 효과 | 위험 |
-|------|------|------|----------|------|
-| **P0** | BUG-1: Softmax 정합성 | 수시간 | 정합성 수정 | 낮음 |
-| **P0** | BUG-2: Attention head_dim | 1일 | 실제 모델 지원 | 낮음 |
-| **P0** | BUG-3: Attention 메모리 초과 | 1일 | GPU fault 방지 | 낮음 |
-| **P0** | BUG-4: 스레드 기아 수정 | 수시간 | 정합성 수정 | 낮음 |
+| 순위 | 항목 | 노력 | 예상 효과 | 위험 | 상태 |
+|------|------|------|----------|------|------|
+| **P0** | BUG-1: Softmax 정합성 | 수시간 | 정합성 수정 | 낮음 | ✅ RESOLVED |
+| **P0** | BUG-2: Attention head_dim | 1일 | 실제 모델 지원 | 낮음 | ✅ RESOLVED |
+| **P0** | BUG-3: Attention 메모리 초과 | 1일 | GPU fault 방지 | 낮음 | ✅ RESOLVED |
+| **P0** | BUG-4: 스레드 기아 수정 | 수시간 | 정합성 수정 | 낮음 | ✅ RESOLVED |
 | **P1** | OPT-1: simdgroup_matrix Attention | 수일 | **10-30x** | 높음 |
 | **P1** | OPT-2: Reduction 병렬화 | 수일 | **50-256x** | 중간 |
-| **P1** | OPT-3: Normalization 병렬화 | 수일 | **32-1000x** | 중간 |
+| **P1** | OPT-3: Normalization 큰 텐서 최적화 | 수일 | **2-3x** (큰 텐서) | 중간 |
 | **P1** | OPT-4: MPSGraph 캐시 연결 | 수일 | **2-3x** (반복 추론) | 낮음 |
 | **P1** | OPT-5: Per-Op 동기화 제거 | 수일 | **15-30%** | 중간 |
-| **P1** | OPT-14: L2 캐시 키 충돌 수정 | 수시간 | 정합성 (OPT-4 전제조건) | 낮음 |
+| **P1** | OPT-15: L2 캐시 키 충돌 수정 | 수시간 | 정합성 (OPT-4 전제조건) | 낮음 |
 | **P2** | OPT-6: 소규모 텐서 CPU 패스트패스 | 수일 | **10-30x** (소규모) | 낮음 |
 | **P2** | OPT-7: Elementwise 벡터화 | 1일 | **2-4x** | 낮음 |
-| **P2** | OPT-8: Online Softmax | 1일 | **2-3x** | 낮음 |
+| **P2** | OPT-8: Softmax 병렬화 | 수일 | **32-256x** | 중간 |
 | **P2** | OPT-9: 할당기 중간 크기 | 수일 | 메모리 15-25% | 낮음 |
 | **P2** | OPT-10: Untracked hazard | 수시간 | **3-8%** | 낮음 |
 | **P2** | OPT-11: Worker drain 최적화 | 수시간 | **5-15%** | 낮음 |
 | **P2** | OPT-12: Private 모드 기본값 | 수일 | **2-10%** | 중간 |
 | **P3** | OPT-13: Fusion 패턴 연결 | 1-2주 | **1.15-2x** (패턴별) | 중간 |
 | **P3** | OPT-14: Shape Bucketing 완성 | 1주 | 컴파일 20-50% 감소 | 중간 |
-| **P3** | OPT-15: Lazy Evaluation | 2-4주 | **1.5-3x** | 높음 |
-| **P4** | OPT-16: Metal 4 마이그레이션 | 1-2개월 | 차세대 지원 | 높음 |
-| **P4** | OPT-17: BFloat16 | 2-3주 | 학습 안정성 | 중간 |
-| **P4** | OPT-18: M5 Neural Accelerator | 1개월 | **4.6x** (attention) | 높음 |
-| **P4** | OPT-19: fast 모듈 | 1-2개월 | **10-50x** (fused ops) | 중간 |
+| **P3** | OPT-15: L2 캐시 키 충돌 수정 | 수시간 | 정합성 (OPT-4 전제조건) | 낮음 |
+| **P3** | OPT-16: Lazy Evaluation | 2-4주 | **1.5-3x** | 높음 |
+| **P4** | OPT-17: Metal 4 마이그레이션 | 1-2개월 | 차세대 지원 | 높음 |
+| **P4** | OPT-18: BFloat16 | 2-3주 | 학습 안정성 | 중간 |
+| **P4** | OPT-19: M5 Neural Accelerator | 1개월 | **4.6x** (attention) | 높음 |
+| **P4** | OPT-20: fast 모듈 | 1-2개월 | **10-50x** (fused ops) | 중간 |
 
 ---
 

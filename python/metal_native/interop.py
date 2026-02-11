@@ -45,18 +45,49 @@ def from_torch(tensor: 'torch.Tensor', requires_grad: Optional[bool] = None) -> 
         )
 
     from .tensor import Tensor
+    from metal_native import _C
 
     if requires_grad is None:
         requires_grad = tensor.requires_grad
 
-    # Move to CPU if needed for UMA shared memory
+    # Zero-copy path for MPS tensors (Apple Silicon unified memory)
+    if tensor.device.type == 'mps':
+        if not tensor.is_contiguous():
+            tensor = tensor.contiguous()
+
+        # Map torch dtype to string
+        dtype_map = {
+            torch.float32: 'float32',
+            torch.float16: 'float16',
+            torch.bfloat16: 'bfloat16',
+            torch.int64: 'int64',
+            torch.int32: 'int32',
+            torch.int16: 'int16',
+            torch.int8: 'int8',
+            torch.uint8: 'uint8',
+            torch.bool: 'bool',
+        }
+        dtype_str = dtype_map.get(tensor.dtype)
+        if dtype_str is None:
+            # Fall back to string conversion for unknown types
+            dtype_str = str(tensor.dtype).replace('torch.', '')
+
+        handle = _C.tensor_from_mps_ptr(
+            tensor.data_ptr(),
+            tensor.storage().nbytes(),
+            list(tensor.shape),
+            list(tensor.stride()),
+            dtype_str,
+        )
+        return Tensor(_native_handle=handle, requires_grad=requires_grad)
+
+    # Move to CPU if needed for UMA shared memory (for CUDA/other GPUs)
     if tensor.device.type != 'cpu':
         tensor = tensor.cpu()
 
     # Use zero-copy conversion via DLPack when tensor is contiguous
     if tensor.is_contiguous():
         try:
-            from metal_native import _C
             dlpack_capsule = torch.utils.dlpack.to_dlpack(tensor)
             handle = _C.tensor_from_dlpack(dlpack_capsule, requires_grad)
             return Tensor(_native_handle=handle, requires_grad=requires_grad)

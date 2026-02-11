@@ -52,6 +52,14 @@ public:
     /// Throws MNException(KernelCompilationFailed) if no default library exists.
     void load_default_library();
 
+    // -- Precompilation ------------------------------------------------------
+
+    /// Precompile all registered kernel pipelines asynchronously.
+    /// This eliminates cold-start latency on first kernel invocation.
+    /// Compilation errors are logged but do not throw exceptions.
+    /// Should be called after load_library() or load_default_library().
+    void precompile_pipelines();
+
     // -- Queries -------------------------------------------------------------
 
     /// Number of registered kernel entries.

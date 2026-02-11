@@ -29,6 +29,11 @@ const char* op_type_name(OpType type) noexcept {
         case OpType::LayerNorm: return "LayerNorm";
         case OpType::Add:       return "Add";
         case OpType::Mul:       return "Mul";
+        case OpType::SiLU:      return "SiLU";
+        case OpType::RMSNorm:   return "RMSNorm";
+        case OpType::RoPE:      return "RoPE";
+        case OpType::SwiGLU:    return "SwiGLU";
+        case OpType::Residual:  return "Residual";
     }
     return "Unknown";
 }
@@ -135,6 +140,45 @@ void FusionRegistry::register_builtin_patterns() {
     // Clear existing patterns to avoid duplicates on repeated calls.
     impl_->patterns.clear();
 
+    // --- Transformer-specific patterns (longer patterns first) ---
+
+    // Pattern: Add + RMSNorm (Residual + Normalize, Llama blocks)
+    impl_->patterns.emplace_back(
+        std::vector<OpType>{OpType::Add, OpType::RMSNorm},
+        "FusedResidualRMSNorm",
+        1.4f  // ~40% speedup from memory fusion
+    );
+
+    // Pattern: Add + LayerNorm (Residual + LayerNorm, BERT/GPT blocks)
+    impl_->patterns.emplace_back(
+        std::vector<OpType>{OpType::Add, OpType::LayerNorm},
+        "FusedResidualLayerNorm",
+        1.4f
+    );
+
+    // Pattern: MatMul + BiasAdd + GELU (Transformer FFN layers)
+    impl_->patterns.emplace_back(
+        std::vector<OpType>{OpType::MatMul, OpType::BiasAdd, OpType::GELU},
+        "FusedGEMMBiasGELU",
+        1.3f  // ~30% speedup
+    );
+
+    // Pattern: MatMul + GELU (without bias)
+    impl_->patterns.emplace_back(
+        std::vector<OpType>{OpType::MatMul, OpType::GELU},
+        "FusedMatMulGELU",
+        1.2f
+    );
+
+    // Pattern: SiLU + Mul (unfused SwiGLU components)
+    impl_->patterns.emplace_back(
+        std::vector<OpType>{OpType::SiLU, OpType::Mul},
+        "FusedSwiGLU",
+        1.5f
+    );
+
+    // --- CNN patterns ---
+
     // Pattern 1: Conv2D + BatchNorm + ReLU
     // This is a very common pattern in CNNs (ResNet, MobileNet, etc.).
     impl_->patterns.emplace_back(
@@ -164,14 +208,6 @@ void FusionRegistry::register_builtin_patterns() {
     impl_->patterns.emplace_back(
         std::vector<OpType>{OpType::MatMul, OpType::BiasAdd, OpType::ReLU},
         "FusedGEMMBiasReLU",
-        1.3f  // ~30% speedup
-    );
-
-    // Pattern 5: MatMul + BiasAdd + GELU
-    // Transformer FFN layers.
-    impl_->patterns.emplace_back(
-        std::vector<OpType>{OpType::MatMul, OpType::BiasAdd, OpType::GELU},
-        "FusedGEMMBiasGELU",
         1.3f  // ~30% speedup
     );
 

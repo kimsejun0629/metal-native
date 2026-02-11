@@ -201,11 +201,24 @@ MNTensor DLPackImporter::from_dlpack(DLManagedTensor* dl_tensor) {
     // Handle device type
     if (dl.device.device_type == kDLMetal) {
         // Zero-copy path: wrap existing Metal buffer
-        // NOTE: This assumes the data pointer is from an MTLBuffer.
-        // In practice, you'd need Metal-specific logic to obtain the buffer handle.
-        // For now, we'll fall through to the copy path.
-        MN_THROW(MetalNativeError::InvalidArgument,
-                 "Zero-copy Metal import not yet implemented; use CPU fallback");
+        // Extract data pointer with byte offset
+        void* data = static_cast<uint8_t*>(dl.data) + dl.byte_offset;
+
+        // Compute total bytes from shape and dtype
+        size_t total_bytes = dtype_size(dtype);
+        for (int32_t i = 0; i < dl.ndim; ++i) {
+            total_bytes *= dl.shape[i];
+        }
+
+        // Wrap external pointer as MNBuffer (zero-copy)
+        auto buffer = MNBuffer::wrap_external(
+            MNDevice::instance(),
+            data,
+            total_bytes
+        );
+
+        // Construct and return MNTensor
+        return MNTensor(buffer, shape, strides, dtype, 0);
     } else if (dl.device.device_type == kDLCPU ||
                dl.device.device_type == kDLCUDAHost) {
         // Copy from CPU memory to GPU
