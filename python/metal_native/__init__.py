@@ -49,12 +49,12 @@ __all__ = [
 from ._version import __version__, __version_info__
 
 # Try to import C extension
-_C = None
 _import_error: Optional[Exception] = None
 
 try:
     from . import _C
 except ImportError as e:
+    _C = None
     _import_error = e
     # C extension not available - will raise errors on usage
     # This is OK during build/install time
@@ -185,6 +185,11 @@ def _initialize():
     try:
         # Initialize device and allocator
         _C.initialize()
+        # Auto-load Metal shader library
+        from ._metallib import find_metallib
+        metallib_path = find_metallib()
+        if metallib_path:
+            _C.load_library(metallib_path)
     except Exception as e:
         print(f"Warning: metal_native initialization failed: {e}", file=sys.stderr)
 

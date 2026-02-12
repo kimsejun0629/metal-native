@@ -204,7 +204,14 @@ Components that participate in dynamic budgeting:
 
 ## Quick Start
 
-### 1. Clone and Build
+### Installation
+
+```bash
+# Install from PyPI (macOS 14+, Apple Silicon)
+pip install metal-native
+```
+
+### From Source (Development)
 
 ```bash
 # Clone the repository
@@ -214,41 +221,36 @@ cd metal-native
 # Create a virtual environment (recommended)
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install torch numpy pybind11
 
-# Configure and build
-cmake -B build -DBUILD_PYTHON=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(sysctl -n hw.ncpu)
+# Editable install (builds C++ extension + Metal shaders automatically)
+pip install -e .
 
-# Copy the compiled extension to the Python package
-cp build/python/metal_native/_C.cpython-*-darwin.so python/metal_native/
+# Or build a wheel manually
+pip install build scikit-build-core pybind11
+python -m build --wheel
+pip install dist/*.whl
 ```
 
-### 2. Verify Installation
+### Verify Installation
 
 ```bash
-PYTHONPATH=python:$PYTHONPATH python3 -c "
-import metal_native._C as C
-print('MetalNative loaded successfully!')
-print(f'Available ops: {[x for x in dir(C) if not x.startswith(\"_\")]}')
-"
+python -c "import metal_native; metal_native.print_device_info()"
 ```
 
-### 3. Run Benchmarks
+### Run Benchmarks
 
 ```bash
 # Quick benchmark (~ 2 minutes)
-PYTHONPATH=python:$PYTHONPATH python3 benchmarks/benchmark_comprehensive.py --quick
+python benchmarks/benchmark_comprehensive.py --quick
 
 # Full benchmark with output file
-PYTHONPATH=python:$PYTHONPATH python3 benchmarks/benchmark_comprehensive.py \
-    --output benchmark_results.json
+python benchmarks/benchmark_comprehensive.py --output benchmark_results.json
 
 # Attention-specific benchmark
-PYTHONPATH=python:$PYTHONPATH python3 benchmarks/benchmark_attention.py
+python benchmarks/benchmark_attention.py
 
 # Transformer block benchmark
-PYTHONPATH=python:$PYTHONPATH python3 benchmarks/benchmark_transformer.py
+python benchmarks/benchmark_transformer.py
 ```
 
 ### 4. Basic Usage
@@ -450,7 +452,7 @@ cmake --build build -j$(sysctl -n hw.ncpu)          # Full build (all targets)
 | **Python Tensor API** | 🔄 In Progress | Factory functions connected, arithmetic WIP |
 | **DLPack / NumPy Interop** | 🔄 In Progress | DLPack export/import functional |
 | **Autograd** | 📋 Planned (v0.2.0) | Automatic differentiation |
-| **Pre-built Wheels (PyPI)** | 📋 Planned | Currently source-build only |
+| **Pre-built Wheels (PyPI)** | ✅ Available | `pip install metal-native` (macOS arm64) |
 
 ---
 

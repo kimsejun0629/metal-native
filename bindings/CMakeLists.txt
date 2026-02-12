@@ -29,5 +29,14 @@ create_pybind11_module(
         metal_native_memory
 )
 
-# Python package files are in ../python/metal_native/
-# No need to copy __init__.py from bindings directory
+# Link shader library for metallib path definition
+if(TARGET metal_native_shader_lib)
+    target_link_libraries(_C PRIVATE metal_native_shader_lib)
+endif()
+
+# Install for wheel builds
+if(SKBUILD_BUILD)
+    install(TARGETS _C
+            LIBRARY DESTINATION metal_native
+            COMPONENT python)
+endif()

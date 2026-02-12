@@ -81,8 +81,7 @@ function(compile_metal_shaders)
         METALLIB_PATH ${METALLIB_FILE}
     )
 
-    # Install the metallib
-    install(FILES ${METALLIB_FILE}
-            DESTINATION lib/metal_native/shaders)
+    # Note: metallib install is handled in shaders/CMakeLists.txt
+    # with SKBUILD_BUILD branching for wheel vs dev paths.
 
 endfunction()

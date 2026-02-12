@@ -25,6 +25,18 @@ if(METAL_SHADERS)
         METAL_NATIVE_METALLIB_PATH="${METALLIB_PATH}"
     )
 
+    # Install metallib to appropriate location
+    if(SKBUILD_BUILD)
+        # Wheel: install to site-packages/metal_native/shaders/
+        install(FILES ${METALLIB_PATH}
+                DESTINATION metal_native/shaders
+                COMPONENT python)
+    else()
+        # Development mode: install to lib/metal_native/shaders/
+        install(FILES ${METALLIB_PATH}
+                DESTINATION lib/metal_native/shaders)
+    endif()
+
 else()
     message(WARNING "No Metal shader files found in ${CMAKE_CURRENT_SOURCE_DIR}")
     add_library(metal_native_shader_lib INTERFACE)

@@ -46,13 +46,20 @@ function(create_pybind11_module)
     # Apply Apple Silicon flags
     apply_apple_silicon_flags(${PY_MODULE_MODULE_NAME})
 
-    # Set output directory
-    set_target_properties(${PY_MODULE_MODULE_NAME} PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python/metal_native"
-    )
-
-    # Install to Python site-packages
-    install(TARGETS ${PY_MODULE_MODULE_NAME}
-            LIBRARY DESTINATION "${Python3_SITEARCH}/metal_native")
+    # Set output directory and install destination
+    if(SKBUILD_BUILD)
+        # scikit-build-core manages install — output to build dir only
+        set_target_properties(${PY_MODULE_MODULE_NAME} PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+        )
+        # install is handled in bindings/CMakeLists.txt
+    else()
+        # Development build: output to python/metal_native/ directly
+        set_target_properties(${PY_MODULE_MODULE_NAME} PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python/metal_native"
+        )
+        install(TARGETS ${PY_MODULE_MODULE_NAME}
+                LIBRARY DESTINATION "${Python3_SITEARCH}/metal_native")
+    endif()
 
 endfunction()

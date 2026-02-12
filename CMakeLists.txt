@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.25)
 project(metal_native VERSION 0.1.0 LANGUAGES CXX OBJCXX)
 
+# scikit-build-core detection
+if(DEFINED SKBUILD)
+    message(STATUS "Building via scikit-build-core (wheel mode)")
+    set(SKBUILD_BUILD ON)
+else()
+    set(SKBUILD_BUILD OFF)
+endif()
+
 # C++17 standard required
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
