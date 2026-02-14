@@ -598,3 +598,409 @@ kernel void softmax_simd_cooperative_vec4_fp16(
         out4[i] = half4(result);
     }
 }
+
+// ============================================================================
+// Large-scale softmax kernels: 256 threads with true online single-pass
+// ============================================================================
+
+constant constexpr uint SOFTMAX_LARGE_THREADS = 256;
+constant constexpr uint SOFTMAX_LARGE_SIMD_SIZE = 32;
+constant constexpr uint SOFTMAX_LARGE_NUM_SIMD = SOFTMAX_LARGE_THREADS / SOFTMAX_LARGE_SIMD_SIZE; // 8
+
+// Helper function for online softmax merge
+// Merges two (max, sum) pairs using the online algorithm
+inline float2 merge_online_stats(float2 a, float2 b) {
+    // a.x = max_a, a.y = sum_a
+    // b.x = max_b, b.y = sum_b
+    float new_max = max(a.x, b.x);
+    float new_sum = a.y * exp(a.x - new_max) + b.y * exp(b.x - new_max);
+    return float2(new_max, new_sum);
+}
+
+kernel void softmax_large_fp32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& outer_size [[buffer(2)]],
+    constant uint& reduce_size [[buffer(3)]],
+    constant uint& inner_size [[buffer(4)]],
+    threadgroup float* shared [[threadgroup(0)]],  // 2 * NUM_SIMD_GROUPS floats (max + sum)
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lid [[thread_index_in_simdgroup]],
+    uint simd_gid [[simdgroup_index_in_threadgroup]]
+)
+{
+    // Each threadgroup handles one (outer_idx, inner_idx) pair
+    const uint num_outputs = outer_size * inner_size;
+    if (tg_idx >= num_outputs) return;
+
+    const uint outer_idx = tg_idx / inner_size;
+    const uint inner_idx = tg_idx % inner_size;
+
+    const uint base = outer_idx * reduce_size * inner_size + inner_idx;
+    const uint stride = inner_size;
+
+    // Phase 1: Online single-pass accumulation
+    float thread_max = -INFINITY;
+    float thread_sum = 0.0f;
+
+    for (uint i = tid; i < reduce_size; i += SOFTMAX_LARGE_THREADS) {
+        float val = input[base + i * stride];
+        if (val > thread_max) {
+            thread_sum = thread_sum * exp(thread_max - val) + 1.0f;
+            thread_max = val;
+        } else {
+            thread_sum += exp(val - thread_max);
+        }
+    }
+
+    // Phase 2: Intra-SIMD reduction using online merge
+    float2 thread_stats = float2(thread_max, thread_sum);
+    for (uint offset = SOFTMAX_LARGE_SIMD_SIZE / 2; offset > 0; offset /= 2) {
+        float2 other_stats = float2(
+            simd_shuffle_down(thread_stats.x, offset),
+            simd_shuffle_down(thread_stats.y, offset)
+        );
+        if (simd_lid < offset) {
+            thread_stats = merge_online_stats(thread_stats, other_stats);
+        }
+    }
+
+    // Phase 3: Write SIMD results to shared memory
+    threadgroup float* shared_max = shared;
+    threadgroup float* shared_sum = shared + SOFTMAX_LARGE_NUM_SIMD;
+
+    if (simd_lid == 0) {
+        shared_max[simd_gid] = thread_stats.x;
+        shared_sum[simd_gid] = thread_stats.y;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 4: Inter-SIMD reduction (only first SIMD group participates)
+    float global_max, global_sum;
+    if (simd_gid == 0) {
+        float2 final_stats = float2(-INFINITY, 0.0f);
+        if (simd_lid < SOFTMAX_LARGE_NUM_SIMD) {
+            final_stats = float2(shared_max[simd_lid], shared_sum[simd_lid]);
+        }
+
+        for (uint offset = SOFTMAX_LARGE_SIMD_SIZE / 2; offset > 0; offset /= 2) {
+            float2 other_stats = float2(
+                simd_shuffle_down(final_stats.x, offset),
+                simd_shuffle_down(final_stats.y, offset)
+            );
+            if (simd_lid < offset && simd_lid + offset < SOFTMAX_LARGE_NUM_SIMD) {
+                final_stats = merge_online_stats(final_stats, other_stats);
+            }
+        }
+
+        global_max = simd_broadcast(final_stats.x, 0);
+        global_sum = simd_broadcast(final_stats.y, 0);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Broadcast to all threads
+    if (simd_gid == 0 && simd_lid == 0) {
+        shared_max[0] = global_max;
+        shared_sum[0] = global_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_max = shared_max[0];
+    global_sum = shared_sum[0];
+
+    // Phase 5: Normalize and write output (second pass over device memory)
+    float inv_sum = 1.0f / global_sum;
+    for (uint i = tid; i < reduce_size; i += SOFTMAX_LARGE_THREADS) {
+        output[base + i * stride] = exp(input[base + i * stride] - global_max) * inv_sum;
+    }
+}
+
+kernel void softmax_large_fp16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& outer_size [[buffer(2)]],
+    constant uint& reduce_size [[buffer(3)]],
+    constant uint& inner_size [[buffer(4)]],
+    threadgroup float* shared [[threadgroup(0)]],  // 2 * NUM_SIMD_GROUPS floats (max + sum)
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lid [[thread_index_in_simdgroup]],
+    uint simd_gid [[simdgroup_index_in_threadgroup]]
+)
+{
+    const uint num_outputs = outer_size * inner_size;
+    if (tg_idx >= num_outputs) return;
+
+    const uint outer_idx = tg_idx / inner_size;
+    const uint inner_idx = tg_idx % inner_size;
+
+    const uint base = outer_idx * reduce_size * inner_size + inner_idx;
+    const uint stride = inner_size;
+
+    // Phase 1: Online single-pass accumulation (FP32 accumulation for stability)
+    float thread_max = -INFINITY;
+    float thread_sum = 0.0f;
+
+    for (uint i = tid; i < reduce_size; i += SOFTMAX_LARGE_THREADS) {
+        float val = float(input[base + i * stride]);
+        if (val > thread_max) {
+            thread_sum = thread_sum * exp(thread_max - val) + 1.0f;
+            thread_max = val;
+        } else {
+            thread_sum += exp(val - thread_max);
+        }
+    }
+
+    // Phase 2: Intra-SIMD reduction using online merge
+    float2 thread_stats = float2(thread_max, thread_sum);
+    for (uint offset = SOFTMAX_LARGE_SIMD_SIZE / 2; offset > 0; offset /= 2) {
+        float2 other_stats = float2(
+            simd_shuffle_down(thread_stats.x, offset),
+            simd_shuffle_down(thread_stats.y, offset)
+        );
+        if (simd_lid < offset) {
+            thread_stats = merge_online_stats(thread_stats, other_stats);
+        }
+    }
+
+    // Phase 3: Write SIMD results to shared memory
+    threadgroup float* shared_max = shared;
+    threadgroup float* shared_sum = shared + SOFTMAX_LARGE_NUM_SIMD;
+
+    if (simd_lid == 0) {
+        shared_max[simd_gid] = thread_stats.x;
+        shared_sum[simd_gid] = thread_stats.y;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 4: Inter-SIMD reduction
+    float global_max, global_sum;
+    if (simd_gid == 0) {
+        float2 final_stats = float2(-INFINITY, 0.0f);
+        if (simd_lid < SOFTMAX_LARGE_NUM_SIMD) {
+            final_stats = float2(shared_max[simd_lid], shared_sum[simd_lid]);
+        }
+
+        for (uint offset = SOFTMAX_LARGE_SIMD_SIZE / 2; offset > 0; offset /= 2) {
+            float2 other_stats = float2(
+                simd_shuffle_down(final_stats.x, offset),
+                simd_shuffle_down(final_stats.y, offset)
+            );
+            if (simd_lid < offset && simd_lid + offset < SOFTMAX_LARGE_NUM_SIMD) {
+                final_stats = merge_online_stats(final_stats, other_stats);
+            }
+        }
+
+        global_max = simd_broadcast(final_stats.x, 0);
+        global_sum = simd_broadcast(final_stats.y, 0);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Broadcast to all threads
+    if (simd_gid == 0 && simd_lid == 0) {
+        shared_max[0] = global_max;
+        shared_sum[0] = global_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_max = shared_max[0];
+    global_sum = shared_sum[0];
+
+    // Phase 5: Normalize and write output
+    float inv_sum = 1.0f / global_sum;
+    for (uint i = tid; i < reduce_size; i += SOFTMAX_LARGE_THREADS) {
+        output[base + i * stride] = half(exp(float(input[base + i * stride]) - global_max) * inv_sum);
+    }
+}
+
+kernel void softmax_large_vec4_fp32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& outer_size [[buffer(2)]],
+    constant uint& reduce_size [[buffer(3)]],  // must be multiple of 4
+    constant uint& inner_size [[buffer(4)]],  // must be 1
+    threadgroup float* shared [[threadgroup(0)]],
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lid [[thread_index_in_simdgroup]],
+    uint simd_gid [[simdgroup_index_in_threadgroup]]
+)
+{
+    if (tg_idx >= outer_size) return;
+
+    const uint base = tg_idx * reduce_size;
+    const uint vec_count = reduce_size / 4;
+    device const float4* in4 = reinterpret_cast<device const float4*>(input + base);
+    device float4* out4 = reinterpret_cast<device float4*>(output + base);
+
+    // Phase 1: Online single-pass accumulation with vec4 loads
+    float thread_max = -INFINITY;
+    float thread_sum = 0.0f;
+
+    for (uint i = tid; i < vec_count; i += SOFTMAX_LARGE_THREADS) {
+        float4 v = in4[i];
+        for (uint j = 0; j < 4; j++) {
+            float val = v[j];
+            if (val > thread_max) {
+                thread_sum = thread_sum * exp(thread_max - val) + 1.0f;
+                thread_max = val;
+            } else {
+                thread_sum += exp(val - thread_max);
+            }
+        }
+    }
+
+    // Phase 2-4: Same reduction as scalar version
+    float2 thread_stats = float2(thread_max, thread_sum);
+    for (uint offset = SOFTMAX_LARGE_SIMD_SIZE / 2; offset > 0; offset /= 2) {
+        float2 other_stats = float2(
+            simd_shuffle_down(thread_stats.x, offset),
+            simd_shuffle_down(thread_stats.y, offset)
+        );
+        if (simd_lid < offset) {
+            thread_stats = merge_online_stats(thread_stats, other_stats);
+        }
+    }
+
+    threadgroup float* shared_max = shared;
+    threadgroup float* shared_sum = shared + SOFTMAX_LARGE_NUM_SIMD;
+
+    if (simd_lid == 0) {
+        shared_max[simd_gid] = thread_stats.x;
+        shared_sum[simd_gid] = thread_stats.y;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float global_max, global_sum;
+    if (simd_gid == 0) {
+        float2 final_stats = float2(-INFINITY, 0.0f);
+        if (simd_lid < SOFTMAX_LARGE_NUM_SIMD) {
+            final_stats = float2(shared_max[simd_lid], shared_sum[simd_lid]);
+        }
+
+        for (uint offset = SOFTMAX_LARGE_SIMD_SIZE / 2; offset > 0; offset /= 2) {
+            float2 other_stats = float2(
+                simd_shuffle_down(final_stats.x, offset),
+                simd_shuffle_down(final_stats.y, offset)
+            );
+            if (simd_lid < offset && simd_lid + offset < SOFTMAX_LARGE_NUM_SIMD) {
+                final_stats = merge_online_stats(final_stats, other_stats);
+            }
+        }
+
+        global_max = simd_broadcast(final_stats.x, 0);
+        global_sum = simd_broadcast(final_stats.y, 0);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_gid == 0 && simd_lid == 0) {
+        shared_max[0] = global_max;
+        shared_sum[0] = global_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_max = shared_max[0];
+    global_sum = shared_sum[0];
+
+    // Phase 5: Normalize with vec4 stores
+    float inv_sum = 1.0f / global_sum;
+    for (uint i = tid; i < vec_count; i += SOFTMAX_LARGE_THREADS) {
+        float4 v = in4[i];
+        out4[i] = exp(v - float4(global_max)) * inv_sum;
+    }
+}
+
+kernel void softmax_large_vec4_fp16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& outer_size [[buffer(2)]],
+    constant uint& reduce_size [[buffer(3)]],  // must be multiple of 4
+    constant uint& inner_size [[buffer(4)]],  // must be 1
+    threadgroup float* shared [[threadgroup(0)]],
+    uint tg_idx [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd_lid [[thread_index_in_simdgroup]],
+    uint simd_gid [[simdgroup_index_in_threadgroup]]
+)
+{
+    if (tg_idx >= outer_size) return;
+
+    const uint base = tg_idx * reduce_size;
+    const uint vec_count = reduce_size / 4;
+    device const half4* in4 = reinterpret_cast<device const half4*>(input + base);
+    device half4* out4 = reinterpret_cast<device half4*>(output + base);
+
+    // Phase 1: Online single-pass accumulation with vec4 loads (FP32 accumulation)
+    float thread_max = -INFINITY;
+    float thread_sum = 0.0f;
+
+    for (uint i = tid; i < vec_count; i += SOFTMAX_LARGE_THREADS) {
+        float4 v = float4(in4[i]);
+        for (uint j = 0; j < 4; j++) {
+            float val = v[j];
+            if (val > thread_max) {
+                thread_sum = thread_sum * exp(thread_max - val) + 1.0f;
+                thread_max = val;
+            } else {
+                thread_sum += exp(val - thread_max);
+            }
+        }
+    }
+
+    // Phase 2-4: Same reduction as scalar version
+    float2 thread_stats = float2(thread_max, thread_sum);
+    for (uint offset = SOFTMAX_LARGE_SIMD_SIZE / 2; offset > 0; offset /= 2) {
+        float2 other_stats = float2(
+            simd_shuffle_down(thread_stats.x, offset),
+            simd_shuffle_down(thread_stats.y, offset)
+        );
+        if (simd_lid < offset) {
+            thread_stats = merge_online_stats(thread_stats, other_stats);
+        }
+    }
+
+    threadgroup float* shared_max = shared;
+    threadgroup float* shared_sum = shared + SOFTMAX_LARGE_NUM_SIMD;
+
+    if (simd_lid == 0) {
+        shared_max[simd_gid] = thread_stats.x;
+        shared_sum[simd_gid] = thread_stats.y;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float global_max, global_sum;
+    if (simd_gid == 0) {
+        float2 final_stats = float2(-INFINITY, 0.0f);
+        if (simd_lid < SOFTMAX_LARGE_NUM_SIMD) {
+            final_stats = float2(shared_max[simd_lid], shared_sum[simd_lid]);
+        }
+
+        for (uint offset = SOFTMAX_LARGE_SIMD_SIZE / 2; offset > 0; offset /= 2) {
+            float2 other_stats = float2(
+                simd_shuffle_down(final_stats.x, offset),
+                simd_shuffle_down(final_stats.y, offset)
+            );
+            if (simd_lid < offset && simd_lid + offset < SOFTMAX_LARGE_NUM_SIMD) {
+                final_stats = merge_online_stats(final_stats, other_stats);
+            }
+        }
+
+        global_max = simd_broadcast(final_stats.x, 0);
+        global_sum = simd_broadcast(final_stats.y, 0);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_gid == 0 && simd_lid == 0) {
+        shared_max[0] = global_max;
+        shared_sum[0] = global_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_max = shared_max[0];
+    global_sum = shared_sum[0];
+
+    // Phase 5: Normalize with vec4 stores
+    float inv_sum = 1.0f / global_sum;
+    for (uint i = tid; i < vec_count; i += SOFTMAX_LARGE_THREADS) {
+        float4 v = float4(in4[i]);
+        float4 result = exp(v - float4(global_max)) * inv_sum;
+        out4[i] = half4(result);
+    }
+}

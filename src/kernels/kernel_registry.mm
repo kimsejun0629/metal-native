@@ -30,6 +30,9 @@ struct KernelRegistry::Impl {
 
     /// Protects all mutable state.
     mutable std::mutex mutex;
+
+    /// Ensures precompiled library is loaded exactly once.
+    std::once_flag library_load_flag;
 };
 
 // ---------------------------------------------------------------------------
@@ -70,6 +73,11 @@ void KernelRegistry::register_kernel(const std::string& name,
 // ---------------------------------------------------------------------------
 
 id<MTLComputePipelineState> KernelRegistry::get_pipeline(const std::string& name) {
+    // Ensure precompiled library is loaded on first access
+    std::call_once(impl_->library_load_flag, [this] {
+        load_precompiled_library();
+    });
+
     std::lock_guard<std::mutex> lock(impl_->mutex);
 
     // Check cached pipelines first.
@@ -172,6 +180,85 @@ void KernelRegistry::load_default_library() {
 
     // Precompile all registered kernels asynchronously
     precompile_pipelines();
+}
+
+// ---------------------------------------------------------------------------
+// Precompiled library auto-loading
+// ---------------------------------------------------------------------------
+
+void KernelRegistry::load_precompiled_library() {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+
+    // Already loaded by explicit load_library() or load_default_library() call
+    if (impl_->library != nil) {
+        return;
+    }
+
+    @autoreleasepool {
+        id<MTLDevice> device = MNDevice::instance().metal_device();
+        NSError* error = nil;
+
+        // Strategy 1: Try compile-time metallib path (CMake METAL_NATIVE_METALLIB_PATH)
+        #ifdef METAL_NATIVE_METALLIB_PATH
+        {
+            NSString* path = @METAL_NATIVE_METALLIB_PATH;
+            if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+                NSURL* url = [NSURL fileURLWithPath:path];
+                impl_->library = [device newLibraryWithURL:url error:&error];
+                if (impl_->library != nil) {
+                    NSLog(@"KernelRegistry: loaded precompiled metallib from %@", path);
+                    impl_->pipelines.clear();
+                    precompile_pipelines();
+                    return;
+                }
+            }
+        }
+        #endif
+
+        // Strategy 2: Try main bundle (for installed .app or framework)
+        {
+            NSBundle* bundle = [NSBundle mainBundle];
+            NSString* path = [bundle pathForResource:@"metal_native" ofType:@"metallib"];
+            if (path != nil) {
+                NSURL* url = [NSURL fileURLWithPath:path];
+                impl_->library = [device newLibraryWithURL:url error:&error];
+                if (impl_->library != nil) {
+                    NSLog(@"KernelRegistry: loaded precompiled metallib from bundle: %@", path);
+                    impl_->pipelines.clear();
+                    precompile_pipelines();
+                    return;
+                }
+            }
+        }
+
+        // Strategy 3: Search relative to current working directory (Python package layout)
+        {
+            NSArray* searchPaths = @[
+                @"shaders/metal_native.metallib",                    // Dev build: build/shaders/
+                @"metal_native/shaders/metal_native.metallib",       // Wheel: site-packages/metal_native/shaders/
+                @"../shaders/metal_native.metallib",                 // If CWD is in bin/
+                @"lib/metal_native/shaders/metal_native.metallib",   // Dev install layout
+            ];
+
+            for (NSString* relativePath in searchPaths) {
+                NSString* fullPath = [relativePath stringByStandardizingPath];
+                if ([[NSFileManager defaultManager] fileExistsAtPath:fullPath]) {
+                    NSURL* url = [NSURL fileURLWithPath:fullPath];
+                    impl_->library = [device newLibraryWithURL:url error:&error];
+                    if (impl_->library != nil) {
+                        NSLog(@"KernelRegistry: loaded precompiled metallib from %@", fullPath);
+                        impl_->pipelines.clear();
+                        precompile_pipelines();
+                        return;
+                    }
+                }
+            }
+        }
+
+        // No precompiled library found - will fall back to explicit load_library() call
+        NSLog(@"KernelRegistry: warning: precompiled metallib not found, "
+              "kernels will need explicit library loading via load_library()");
+    }
 }
 
 // ---------------------------------------------------------------------------

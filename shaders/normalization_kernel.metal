@@ -982,3 +982,282 @@ kernel void rms_norm_large_fp16(
         output[base_offset + i] = half(float(input[base_offset + i]) * inv_rms * float(weight[i]));
     }
 }
+
+// ============================================================================
+// Register-Cached Large Normalization Kernels (256 threads, norm_size <= 8192)
+// ============================================================================
+
+// Maximum elements per thread for register caching
+// For norm_size=8192, each of 256 threads handles 32 elements (128 bytes in FP32)
+// Conservative limit to avoid register spilling on Apple Silicon
+constant constexpr uint MAX_ELEMENTS_PER_THREAD = 32;
+
+// RMS Norm Large RegCache FP32
+// Two-pass: Pass 1 reads input -> cache in registers -> compute sq_sum
+//           Pass 2 normalizes from cached values (zero device memory reads)
+kernel void rms_norm_large_regcache_fp32(
+    device const float* input       [[buffer(0)]],
+    device const float* weight      [[buffer(1)]],
+    device float* output            [[buffer(2)]],
+    constant uint& batch_size       [[buffer(3)]],
+    constant uint& norm_size        [[buffer(4)]],
+    constant float& eps             [[buffer(5)]],
+    threadgroup float* shared       [[threadgroup(0)]],  // 8 floats
+    uint  tg_idx                    [[threadgroup_position_in_grid]],
+    uint  tid_in_tg                 [[thread_index_in_threadgroup]],
+    uint  simd_group_id             [[simdgroup_index_in_threadgroup]],
+    uint  simd_lane_id              [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = tg_idx;
+    if (batch_idx >= batch_size) return;
+
+    const uint base_offset = batch_idx * norm_size;
+
+    // Register cache: store this thread's elements
+    float cached[MAX_ELEMENTS_PER_THREAD];
+
+    // Pass 1: Read input with scalar strided loads, cache in registers, compute sq_sum
+    uint num_cached = 0;
+    float partial_sq_sum = 0.0f;
+    for (uint i = tid_in_tg; i < norm_size && num_cached < MAX_ELEMENTS_PER_THREAD; i += LARGE_NORM_THREADS) {
+        float val = input[base_offset + i];
+        cached[num_cached] = val;
+        partial_sq_sum += val * val;
+        num_cached++;
+    }
+
+    // SIMD + shared memory reduction (same as existing)
+    partial_sq_sum = simd_sum(partial_sq_sum);
+    if (simd_lane_id == 0) shared[simd_group_id] = partial_sq_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float total_sq_sum = 0.0f;
+    if (simd_group_id == 0 && simd_lane_id < LARGE_NORM_SIMD_GROUPS) {
+        total_sq_sum = shared[simd_lane_id];
+    }
+    if (simd_group_id == 0) {
+        total_sq_sum = simd_sum(total_sq_sum);
+        if (simd_lane_id == 0) shared[0] = total_sq_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float inv_rms = 1.0f / sqrt(shared[0] / float(norm_size) + eps);
+
+    // Pass 2: Normalize using cached values (NO device memory read!)
+    uint cache_idx = 0;
+    for (uint i = tid_in_tg; i < norm_size && cache_idx < num_cached; i += LARGE_NORM_THREADS) {
+        output[base_offset + i] = cached[cache_idx] * inv_rms * weight[i];
+        cache_idx++;
+    }
+}
+
+// RMS Norm Large RegCache FP16
+kernel void rms_norm_large_regcache_fp16(
+    device const half* input        [[buffer(0)]],
+    device const half* weight       [[buffer(1)]],
+    device half* output             [[buffer(2)]],
+    constant uint& batch_size       [[buffer(3)]],
+    constant uint& norm_size        [[buffer(4)]],
+    constant float& eps             [[buffer(5)]],
+    threadgroup float* shared       [[threadgroup(0)]],
+    uint  tg_idx                    [[threadgroup_position_in_grid]],
+    uint  tid_in_tg                 [[thread_index_in_threadgroup]],
+    uint  simd_group_id             [[simdgroup_index_in_threadgroup]],
+    uint  simd_lane_id              [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = tg_idx;
+    if (batch_idx >= batch_size) return;
+
+    const uint base_offset = batch_idx * norm_size;
+
+    float cached[MAX_ELEMENTS_PER_THREAD];
+
+    // Pass 1: Read input (half->float), cache, compute sq_sum with FP32
+    uint num_cached = 0;
+    float partial_sq_sum = 0.0f;
+    for (uint i = tid_in_tg; i < norm_size && num_cached < MAX_ELEMENTS_PER_THREAD; i += LARGE_NORM_THREADS) {
+        float val = float(input[base_offset + i]);
+        cached[num_cached] = val;
+        partial_sq_sum += val * val;
+        num_cached++;
+    }
+
+    partial_sq_sum = simd_sum(partial_sq_sum);
+    if (simd_lane_id == 0) shared[simd_group_id] = partial_sq_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float total_sq_sum = 0.0f;
+    if (simd_group_id == 0 && simd_lane_id < LARGE_NORM_SIMD_GROUPS) {
+        total_sq_sum = shared[simd_lane_id];
+    }
+    if (simd_group_id == 0) {
+        total_sq_sum = simd_sum(total_sq_sum);
+        if (simd_lane_id == 0) shared[0] = total_sq_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float inv_rms = 1.0f / sqrt(shared[0] / float(norm_size) + eps);
+
+    // Pass 2: Normalize from cache, write as half
+    uint cache_idx = 0;
+    for (uint i = tid_in_tg; i < norm_size && cache_idx < num_cached; i += LARGE_NORM_THREADS) {
+        output[base_offset + i] = half(cached[cache_idx] * inv_rms * float(weight[i]));
+        cache_idx++;
+    }
+}
+
+// Layer Norm Large RegCache FP32
+// Two-pass: Pass 1 reads input -> cache -> compute sum and sq_sum
+//           Pass 2 normalizes from cached values
+kernel void layer_norm_large_regcache_fp32(
+    device const float* input       [[buffer(0)]],
+    device const float* weight      [[buffer(1)]],
+    device const float* bias        [[buffer(2)]],
+    device float* output            [[buffer(3)]],
+    constant uint& batch_size       [[buffer(4)]],
+    constant uint& norm_size        [[buffer(5)]],
+    constant float& eps             [[buffer(6)]],
+    threadgroup float* shared       [[threadgroup(0)]],  // 16 floats (8 sum + 8 sq_sum)
+    uint  tg_idx                    [[threadgroup_position_in_grid]],
+    uint  tid_in_tg                 [[thread_index_in_threadgroup]],
+    uint  simd_group_id             [[simdgroup_index_in_threadgroup]],
+    uint  simd_lane_id              [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = tg_idx;
+    if (batch_idx >= batch_size) return;
+
+    const uint base_offset = batch_idx * norm_size;
+
+    float cached[MAX_ELEMENTS_PER_THREAD];
+
+    // Pass 1: Read input, cache, compute sum and sq_sum
+    uint num_cached = 0;
+    float partial_sum = 0.0f;
+    float partial_sq_sum = 0.0f;
+    for (uint i = tid_in_tg; i < norm_size && num_cached < MAX_ELEMENTS_PER_THREAD; i += LARGE_NORM_THREADS) {
+        float val = input[base_offset + i];
+        cached[num_cached] = val;
+        partial_sum += val;
+        partial_sq_sum += val * val;
+        num_cached++;
+    }
+
+    // Reduce sum
+    partial_sum = simd_sum(partial_sum);
+    if (simd_lane_id == 0) shared[simd_group_id] = partial_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float total_sum = 0.0f;
+    if (simd_group_id == 0 && simd_lane_id < LARGE_NORM_SIMD_GROUPS) {
+        total_sum = shared[simd_lane_id];
+    }
+    if (simd_group_id == 0) {
+        total_sum = simd_sum(total_sum);
+        if (simd_lane_id == 0) shared[0] = total_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Reduce sq_sum
+    partial_sq_sum = simd_sum(partial_sq_sum);
+    if (simd_lane_id == 0) shared[LARGE_NORM_SIMD_GROUPS + simd_group_id] = partial_sq_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float total_sq_sum = 0.0f;
+    if (simd_group_id == 0 && simd_lane_id < LARGE_NORM_SIMD_GROUPS) {
+        total_sq_sum = shared[LARGE_NORM_SIMD_GROUPS + simd_lane_id];
+    }
+    if (simd_group_id == 0) {
+        total_sq_sum = simd_sum(total_sq_sum);
+        if (simd_lane_id == 0) shared[1] = total_sq_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float mean = shared[0] / float(norm_size);
+    float variance = shared[1] / float(norm_size) - mean * mean;
+    float inv_std = 1.0f / sqrt(variance + eps);
+
+    // Pass 2: Normalize from cache
+    uint cache_idx = 0;
+    for (uint i = tid_in_tg; i < norm_size && cache_idx < num_cached; i += LARGE_NORM_THREADS) {
+        float normalized = (cached[cache_idx] - mean) * inv_std;
+        output[base_offset + i] = normalized * weight[i] + bias[i];
+        cache_idx++;
+    }
+}
+
+// Layer Norm Large RegCache FP16
+kernel void layer_norm_large_regcache_fp16(
+    device const half* input        [[buffer(0)]],
+    device const half* weight       [[buffer(1)]],
+    device const half* bias         [[buffer(2)]],
+    device half* output             [[buffer(3)]],
+    constant uint& batch_size       [[buffer(4)]],
+    constant uint& norm_size        [[buffer(5)]],
+    constant float& eps             [[buffer(6)]],
+    threadgroup float* shared       [[threadgroup(0)]],
+    uint  tg_idx                    [[threadgroup_position_in_grid]],
+    uint  tid_in_tg                 [[thread_index_in_threadgroup]],
+    uint  simd_group_id             [[simdgroup_index_in_threadgroup]],
+    uint  simd_lane_id              [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = tg_idx;
+    if (batch_idx >= batch_size) return;
+
+    const uint base_offset = batch_idx * norm_size;
+
+    float cached[MAX_ELEMENTS_PER_THREAD];
+
+    // Pass 1: Read input (half->float), cache, compute sum and sq_sum
+    uint num_cached = 0;
+    float partial_sum = 0.0f;
+    float partial_sq_sum = 0.0f;
+    for (uint i = tid_in_tg; i < norm_size && num_cached < MAX_ELEMENTS_PER_THREAD; i += LARGE_NORM_THREADS) {
+        float val = float(input[base_offset + i]);
+        cached[num_cached] = val;
+        partial_sum += val;
+        partial_sq_sum += val * val;
+        num_cached++;
+    }
+
+    // Reduce sum
+    partial_sum = simd_sum(partial_sum);
+    if (simd_lane_id == 0) shared[simd_group_id] = partial_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float total_sum = 0.0f;
+    if (simd_group_id == 0 && simd_lane_id < LARGE_NORM_SIMD_GROUPS) {
+        total_sum = shared[simd_lane_id];
+    }
+    if (simd_group_id == 0) {
+        total_sum = simd_sum(total_sum);
+        if (simd_lane_id == 0) shared[0] = total_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Reduce sq_sum
+    partial_sq_sum = simd_sum(partial_sq_sum);
+    if (simd_lane_id == 0) shared[LARGE_NORM_SIMD_GROUPS + simd_group_id] = partial_sq_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float total_sq_sum = 0.0f;
+    if (simd_group_id == 0 && simd_lane_id < LARGE_NORM_SIMD_GROUPS) {
+        total_sq_sum = shared[LARGE_NORM_SIMD_GROUPS + simd_lane_id];
+    }
+    if (simd_group_id == 0) {
+        total_sq_sum = simd_sum(total_sq_sum);
+        if (simd_lane_id == 0) shared[1] = total_sq_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float mean = shared[0] / float(norm_size);
+    float variance = shared[1] / float(norm_size) - mean * mean;
+    float inv_std = 1.0f / sqrt(variance + eps);
+
+    // Pass 2: Normalize from cache, write as half
+    uint cache_idx = 0;
+    for (uint i = tid_in_tg; i < norm_size && cache_idx < num_cached; i += LARGE_NORM_THREADS) {
+        float normalized = (cached[cache_idx] - mean) * inv_std;
+        output[base_offset + i] = half(normalized * float(weight[i]) + float(bias[i]));
+        cache_idx++;
+    }
+}

@@ -77,12 +77,14 @@ MNTensor dispatch_reduction(const MNTensor& input,
     @autoreleasepool {
         CommandPipeline& cmd_pipeline = device.command_pipeline();
 
-        // Select kernel based on dtype
+        // Select kernel based on dtype and vec4 optimization
+        const bool use_vec4 = (inner_size == 1 && reduce_size >= 16 && reduce_size % 4 == 0);
+
         std::string kernel_name_str;
         if (input.dtype() == MNDType::Float32) {
-            kernel_name_str = std::string(kernel_prefix) + "_fp32";
+            kernel_name_str = std::string(kernel_prefix) + (use_vec4 ? "_vec4_fp32" : "_fp32");
         } else if (input.dtype() == MNDType::Float16) {
-            kernel_name_str = std::string(kernel_prefix) + "_fp16";
+            kernel_name_str = std::string(kernel_prefix) + (use_vec4 ? "_vec4_fp16" : "_fp16");
         } else {
             MN_THROW(MetalNativeError::InvalidArgument,
                      "reduction: unsupported dtype");

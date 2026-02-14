@@ -50,14 +50,17 @@ MNTensor layer_norm(const MNTensor& input,
         // - norm_size < 128: basic scalar kernels (32 threads)
         const bool use_large = (norm_size >= 2048);
         const bool use_vectorized = (!use_large && norm_size >= 128 && norm_size <= 8192);
+        const bool use_regcache = use_large && (norm_size / 256 <= 32);  // max 8192
 
         const char* kernel_name = nullptr;
         if (input.dtype() == MNDType::Float32) {
-            if (use_large) kernel_name = "layer_norm_large_fp32";
+            if (use_regcache) kernel_name = "layer_norm_large_regcache_fp32";
+            else if (use_large) kernel_name = "layer_norm_large_fp32";
             else if (use_vectorized) kernel_name = "layer_norm_vec_fp32";
             else kernel_name = "layer_norm_kernel";
         } else if (input.dtype() == MNDType::Float16) {
-            if (use_large) kernel_name = "layer_norm_large_fp16";
+            if (use_regcache) kernel_name = "layer_norm_large_regcache_fp16";
+            else if (use_large) kernel_name = "layer_norm_large_fp16";
             else if (use_vectorized) kernel_name = "layer_norm_vec_fp16";
             else kernel_name = "layer_norm_kernel_fp16";
         } else {
@@ -138,14 +141,17 @@ MNTensor rms_norm(const MNTensor& input,
         // Kernel selection: same strategy as layer_norm
         const bool use_large = (norm_size >= 2048);
         const bool use_vectorized = (!use_large && norm_size >= 128 && norm_size <= 8192);
+        const bool use_regcache = use_large && (norm_size / 256 <= 32);  // max 8192
 
         const char* kernel_name = nullptr;
         if (input.dtype() == MNDType::Float32) {
-            if (use_large) kernel_name = "rms_norm_large_fp32";
+            if (use_regcache) kernel_name = "rms_norm_large_regcache_fp32";
+            else if (use_large) kernel_name = "rms_norm_large_fp32";
             else if (use_vectorized) kernel_name = "rms_norm_vec_fp32";
             else kernel_name = "rms_norm_kernel";
         } else if (input.dtype() == MNDType::Float16) {
-            if (use_large) kernel_name = "rms_norm_large_fp16";
+            if (use_regcache) kernel_name = "rms_norm_large_regcache_fp16";
+            else if (use_large) kernel_name = "rms_norm_large_fp16";
             else if (use_vectorized) kernel_name = "rms_norm_vec_fp16";
             else kernel_name = "rms_norm_kernel_fp16";
         } else {

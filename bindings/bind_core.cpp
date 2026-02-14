@@ -170,6 +170,16 @@ PYBIND11_MODULE(_C, m) {
     device_module.def("properties", &python::device_properties,
                      "Get device properties dictionary");
 
+    // Top-level aliases (used by Python wrapper device.py)
+    m.def("device_name", &python::device_name,
+          "Get the name of the Metal device");
+    m.def("is_available", &python::is_available,
+          "Check if Metal is available");
+    m.def("supports_bfloat16", &python::supports_bfloat16,
+          "Check if bfloat16 is supported");
+    m.def("device_properties", &python::device_properties,
+          "Get device properties dictionary");
+
     // ---------------------------------------------------------------------------
     // Initialization
     // ---------------------------------------------------------------------------
@@ -317,31 +327,41 @@ namespace metal_native {
 namespace python {
 
 std::string device_name() {
-    // TODO: Implement with actual Metal device query
-    return "Apple M-Series GPU (Placeholder)";
+    try {
+        return MNDevice::instance().name();
+    } catch (...) {
+        return "Unknown Metal Device";
+    }
 }
 
 bool is_available() {
-    // TODO: Implement actual Metal availability check
-    return true;
+    try {
+        MNDevice::instance();
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 bool supports_bfloat16() {
-    // TODO: Check actual device capabilities
-    return true;
+    try {
+        return MNDevice::instance().supports_bfloat16();
+    } catch (...) {
+        return false;
+    }
 }
 
 py::dict device_properties() {
-    // TODO: Query actual device properties
+    auto& dev = MNDevice::instance();
     py::dict props;
-    props["name"] = "Apple M-Series GPU";
-    props["cores"] = 32;
-    props["memory"] = 16ULL * 1024 * 1024 * 1024;  // 16 GB
-    props["bandwidth"] = 400.0;  // GB/s
-    props["max_buffer_length"] = 1ULL << 32;
-    props["supports_bfloat16"] = true;
-    props["unified_memory"] = true;
-    props["recommended_working_set"] = 12ULL * 1024 * 1024 * 1024;  // 12 GB
+    props["name"] = dev.name();
+    props["cores"] = 0;  // Not directly queryable via MTLDevice
+    props["memory"] = dev.recommended_max_working_set_size();
+    props["bandwidth"] = 0.0;  // Not directly queryable via MTLDevice
+    props["max_buffer_length"] = dev.max_buffer_length();
+    props["supports_bfloat16"] = dev.supports_bfloat16();
+    props["unified_memory"] = dev.has_unified_memory();
+    props["recommended_working_set"] = dev.recommended_max_working_set_size();
     return props;
 }
 

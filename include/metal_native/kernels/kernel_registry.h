@@ -75,6 +75,10 @@ private:
     KernelRegistry();
     ~KernelRegistry();
 
+    /// Attempt to load precompiled metallib automatically on first use.
+    /// Called once via std::call_once from get_pipeline().
+    void load_precompiled_library();
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

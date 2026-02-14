@@ -43,7 +43,8 @@ def test_synchronize_with_mock():
 
 def test_synchronize_raises_when_c_unavailable():
     """Test synchronize raises RuntimeError when C extension unavailable."""
-    with patch.dict(sys.modules, {'metal_native._C': None}):
+    import metal_native
+    with patch.object(metal_native, '_C', None):
         if 'metal_native.utils' in sys.modules:
             del sys.modules['metal_native.utils']
         from metal_native.utils import synchronize
@@ -72,7 +73,8 @@ def test_empty_cache_with_mock():
 
 def test_empty_cache_silent_when_c_unavailable():
     """Test empty_cache fails silently when C extension unavailable."""
-    with patch.dict(sys.modules, {'metal_native._C': None}):
+    import metal_native
+    with patch.object(metal_native, '_C', None):
         if 'metal_native.utils' in sys.modules:
             del sys.modules['metal_native.utils']
         from metal_native.utils import empty_cache
@@ -104,7 +106,8 @@ def test_memory_allocated_with_mock():
 
 def test_memory_allocated_raises_when_c_unavailable():
     """Test memory_allocated raises RuntimeError when C extension unavailable."""
-    with patch.dict(sys.modules, {'metal_native._C': None}):
+    import metal_native
+    with patch.object(metal_native, '_C', None):
         if 'metal_native.utils' in sys.modules:
             del sys.modules['metal_native.utils']
         from metal_native.utils import memory_allocated
@@ -136,7 +139,8 @@ def test_max_memory_allocated_with_mock():
 
 def test_max_memory_allocated_raises_when_c_unavailable():
     """Test max_memory_allocated raises RuntimeError when C extension unavailable."""
-    with patch.dict(sys.modules, {'metal_native._C': None}):
+    import metal_native
+    with patch.object(metal_native, '_C', None):
         if 'metal_native.utils' in sys.modules:
             del sys.modules['metal_native.utils']
         from metal_native.utils import max_memory_allocated
@@ -165,7 +169,8 @@ def test_reset_peak_stats_with_mock():
 
 def test_reset_peak_stats_silent_when_c_unavailable():
     """Test reset_peak_stats fails silently when C extension unavailable."""
-    with patch.dict(sys.modules, {'metal_native._C': None}):
+    import metal_native
+    with patch.object(metal_native, '_C', None):
         if 'metal_native.utils' in sys.modules:
             del sys.modules['metal_native.utils']
         from metal_native.utils import reset_peak_stats
@@ -202,7 +207,8 @@ def test_set_seed_negative_raises():
 
 def test_set_seed_raises_when_c_unavailable():
     """Test set_seed raises RuntimeError when C extension unavailable."""
-    with patch.dict(sys.modules, {'metal_native._C': None}):
+    import metal_native
+    with patch.object(metal_native, '_C', None):
         if 'metal_native.utils' in sys.modules:
             del sys.modules['metal_native.utils']
         from metal_native.utils import set_seed
@@ -253,7 +259,8 @@ def test_get_memory_info_with_mock():
 
 def test_get_memory_info_when_c_unavailable():
     """Test get_memory_info returns unavailable message when C extension unavailable."""
-    with patch.dict(sys.modules, {'metal_native._C': None}):
+    import metal_native
+    with patch.object(metal_native, '_C', None):
         if 'metal_native.utils' in sys.modules:
             del sys.modules['metal_native.utils']
         from metal_native.utils import get_memory_info

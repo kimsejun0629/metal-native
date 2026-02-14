@@ -649,3 +649,313 @@ kernel void argmin_fp16(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Vectorized reduction kernels (vec4) for contiguous case (inner_size == 1)
+// ---------------------------------------------------------------------------
+
+/// Reduce sum for FP32 with vec4 loads (inner_size == 1 only).
+kernel void reduce_sum_vec4_fp32(
+    device const float* input      [[buffer(0)]],
+    device float*       output     [[buffer(1)]],
+    constant uint32_t*  constants  [[buffer(2)]],  // [outer_size, reduce_size, inner_size=1]
+    uint gid       [[threadgroup_position_in_grid]],
+    uint tid       [[thread_index_in_threadgroup]],
+    uint simd_lid  [[thread_index_in_simdgroup]],
+    uint simd_gid  [[simdgroup_index_in_threadgroup]],
+    threadgroup float* shared [[threadgroup(0)]])
+{
+    const uint reduce_size = constants[1];
+
+    // Phase 1: Strided partial reduction with vec4 loads
+    const uint base = gid * reduce_size;
+    const uint vec_count = reduce_size / 4;
+    const uint remainder = reduce_size % 4;
+
+    device const float4* in4 = reinterpret_cast<device const float4*>(input + base);
+    float partial = 0.0f;
+
+    for (uint i = tid; i < vec_count; i += THREADGROUP_SIZE) {
+        float4 v = in4[i];
+        partial += v.x + v.y + v.z + v.w;
+    }
+
+    // Handle remainder elements
+    uint rem_base = vec_count * 4;
+    if (tid < remainder) {
+        partial += input[base + rem_base + tid];
+    }
+
+    // Phase 2: SIMD group reduction
+    partial = simd_sum(partial);
+
+    // Phase 3: Store SIMD group results
+    if (simd_lid == 0) {
+        shared[simd_gid] = partial;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 4: Final reduction by first SIMD group
+    if (tid < NUM_SIMD_GROUPS) {
+        float val = shared[tid];
+        val = simd_sum(val);
+        if (tid == 0) {
+            output[gid] = val;
+        }
+    }
+}
+
+/// Reduce sum for FP16 with vec4 loads and FP32 accumulation (inner_size == 1 only).
+kernel void reduce_sum_vec4_fp16(
+    device const half* input       [[buffer(0)]],
+    device float*      output      [[buffer(1)]],
+    constant uint32_t* constants   [[buffer(2)]],  // [outer_size, reduce_size, inner_size=1]
+    uint gid       [[threadgroup_position_in_grid]],
+    uint tid       [[thread_index_in_threadgroup]],
+    uint simd_lid  [[thread_index_in_simdgroup]],
+    uint simd_gid  [[simdgroup_index_in_threadgroup]],
+    threadgroup float* shared [[threadgroup(0)]])
+{
+    const uint reduce_size = constants[1];
+
+    // Phase 1: Strided partial reduction with vec4 loads
+    const uint base = gid * reduce_size;
+    const uint vec_count = reduce_size / 4;
+    const uint remainder = reduce_size % 4;
+
+    device const half4* in4 = reinterpret_cast<device const half4*>(input + base);
+    float partial = 0.0f;
+
+    for (uint i = tid; i < vec_count; i += THREADGROUP_SIZE) {
+        half4 v = in4[i];
+        partial += float(v.x) + float(v.y) + float(v.z) + float(v.w);
+    }
+
+    // Handle remainder elements
+    uint rem_base = vec_count * 4;
+    if (tid < remainder) {
+        partial += float(input[base + rem_base + tid]);
+    }
+
+    // Phase 2: SIMD group reduction
+    partial = simd_sum(partial);
+
+    // Phase 3: Store SIMD group results
+    if (simd_lid == 0) {
+        shared[simd_gid] = partial;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 4: Final reduction by first SIMD group
+    if (tid < NUM_SIMD_GROUPS) {
+        float val = shared[tid];
+        val = simd_sum(val);
+        if (tid == 0) {
+            output[gid] = val;
+        }
+    }
+}
+
+/// Reduce mean for FP32 with vec4 loads (inner_size == 1 only).
+kernel void reduce_mean_vec4_fp32(
+    device const float* input      [[buffer(0)]],
+    device float*       output     [[buffer(1)]],
+    constant uint32_t*  constants  [[buffer(2)]],  // [outer_size, reduce_size, inner_size=1]
+    uint gid       [[threadgroup_position_in_grid]],
+    uint tid       [[thread_index_in_threadgroup]],
+    uint simd_lid  [[thread_index_in_simdgroup]],
+    uint simd_gid  [[simdgroup_index_in_threadgroup]],
+    threadgroup float* shared [[threadgroup(0)]])
+{
+    const uint reduce_size = constants[1];
+
+    // Phase 1: Strided partial reduction with vec4 loads
+    const uint base = gid * reduce_size;
+    const uint vec_count = reduce_size / 4;
+    const uint remainder = reduce_size % 4;
+
+    device const float4* in4 = reinterpret_cast<device const float4*>(input + base);
+    float partial = 0.0f;
+
+    for (uint i = tid; i < vec_count; i += THREADGROUP_SIZE) {
+        float4 v = in4[i];
+        partial += v.x + v.y + v.z + v.w;
+    }
+
+    // Handle remainder elements
+    uint rem_base = vec_count * 4;
+    if (tid < remainder) {
+        partial += input[base + rem_base + tid];
+    }
+
+    // Phase 2: SIMD group reduction
+    partial = simd_sum(partial);
+
+    // Phase 3: Store SIMD group results
+    if (simd_lid == 0) {
+        shared[simd_gid] = partial;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 4: Final reduction by first SIMD group
+    if (tid < NUM_SIMD_GROUPS) {
+        float val = shared[tid];
+        val = simd_sum(val);
+        if (tid == 0) {
+            output[gid] = val / float(reduce_size);
+        }
+    }
+}
+
+/// Reduce mean for FP16 with vec4 loads and FP32 accumulation (inner_size == 1 only).
+kernel void reduce_mean_vec4_fp16(
+    device const half* input       [[buffer(0)]],
+    device float*      output      [[buffer(1)]],
+    constant uint32_t* constants   [[buffer(2)]],  // [outer_size, reduce_size, inner_size=1]
+    uint gid       [[threadgroup_position_in_grid]],
+    uint tid       [[thread_index_in_threadgroup]],
+    uint simd_lid  [[thread_index_in_simdgroup]],
+    uint simd_gid  [[simdgroup_index_in_threadgroup]],
+    threadgroup float* shared [[threadgroup(0)]])
+{
+    const uint reduce_size = constants[1];
+
+    // Phase 1: Strided partial reduction with vec4 loads
+    const uint base = gid * reduce_size;
+    const uint vec_count = reduce_size / 4;
+    const uint remainder = reduce_size % 4;
+
+    device const half4* in4 = reinterpret_cast<device const half4*>(input + base);
+    float partial = 0.0f;
+
+    for (uint i = tid; i < vec_count; i += THREADGROUP_SIZE) {
+        half4 v = in4[i];
+        partial += float(v.x) + float(v.y) + float(v.z) + float(v.w);
+    }
+
+    // Handle remainder elements
+    uint rem_base = vec_count * 4;
+    if (tid < remainder) {
+        partial += float(input[base + rem_base + tid]);
+    }
+
+    // Phase 2: SIMD group reduction
+    partial = simd_sum(partial);
+
+    // Phase 3: Store SIMD group results
+    if (simd_lid == 0) {
+        shared[simd_gid] = partial;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 4: Final reduction by first SIMD group
+    if (tid < NUM_SIMD_GROUPS) {
+        float val = shared[tid];
+        val = simd_sum(val);
+        if (tid == 0) {
+            output[gid] = val / float(reduce_size);
+        }
+    }
+}
+
+/// Reduce max for FP32 with vec4 loads (inner_size == 1 only).
+kernel void reduce_max_vec4_fp32(
+    device const float* input      [[buffer(0)]],
+    device float*       output     [[buffer(1)]],
+    constant uint32_t*  constants  [[buffer(2)]],  // [outer_size, reduce_size, inner_size=1]
+    uint gid       [[threadgroup_position_in_grid]],
+    uint tid       [[thread_index_in_threadgroup]],
+    uint simd_lid  [[thread_index_in_simdgroup]],
+    uint simd_gid  [[simdgroup_index_in_threadgroup]],
+    threadgroup float* shared [[threadgroup(0)]])
+{
+    const uint reduce_size = constants[1];
+
+    // Phase 1: Strided partial reduction with vec4 loads
+    const uint base = gid * reduce_size;
+    const uint vec_count = reduce_size / 4;
+    const uint remainder = reduce_size % 4;
+
+    device const float4* in4 = reinterpret_cast<device const float4*>(input + base);
+    float partial = -INFINITY;
+
+    for (uint i = tid; i < vec_count; i += THREADGROUP_SIZE) {
+        float4 v = in4[i];
+        partial = max(partial, max(max(v.x, v.y), max(v.z, v.w)));
+    }
+
+    // Handle remainder elements
+    uint rem_base = vec_count * 4;
+    if (tid < remainder) {
+        partial = max(partial, input[base + rem_base + tid]);
+    }
+
+    // Phase 2: SIMD group reduction
+    partial = simd_max(partial);
+
+    // Phase 3: Store SIMD group results
+    if (simd_lid == 0) {
+        shared[simd_gid] = partial;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 4: Final reduction by first SIMD group
+    if (tid < NUM_SIMD_GROUPS) {
+        float val = shared[tid];
+        val = simd_max(val);
+        if (tid == 0) {
+            output[gid] = val;
+        }
+    }
+}
+
+/// Reduce max for FP16 with vec4 loads and half output (inner_size == 1 only).
+kernel void reduce_max_vec4_fp16(
+    device const half* input       [[buffer(0)]],
+    device half*       output      [[buffer(1)]],
+    constant uint32_t* constants   [[buffer(2)]],  // [outer_size, reduce_size, inner_size=1]
+    uint gid       [[threadgroup_position_in_grid]],
+    uint tid       [[thread_index_in_threadgroup]],
+    uint simd_lid  [[thread_index_in_simdgroup]],
+    uint simd_gid  [[simdgroup_index_in_threadgroup]],
+    threadgroup half* shared [[threadgroup(0)]])
+{
+    const uint reduce_size = constants[1];
+
+    // Phase 1: Strided partial reduction with vec4 loads
+    const uint base = gid * reduce_size;
+    const uint vec_count = reduce_size / 4;
+    const uint remainder = reduce_size % 4;
+
+    device const half4* in4 = reinterpret_cast<device const half4*>(input + base);
+    float partial = -INFINITY;
+
+    for (uint i = tid; i < vec_count; i += THREADGROUP_SIZE) {
+        half4 v = in4[i];
+        partial = max(partial, max(max(float(v.x), float(v.y)), max(float(v.z), float(v.w))));
+    }
+
+    // Handle remainder elements
+    uint rem_base = vec_count * 4;
+    if (tid < remainder) {
+        partial = max(partial, float(input[base + rem_base + tid]));
+    }
+
+    // Phase 2: SIMD group reduction
+    partial = simd_max(partial);
+
+    // Phase 3: Store SIMD group results
+    if (simd_lid == 0) {
+        shared[simd_gid] = half(partial);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 4: Final reduction by first SIMD group
+    if (tid < NUM_SIMD_GROUPS) {
+        float val = float(shared[tid]);
+        val = simd_max(val);
+        if (tid == 0) {
+            output[gid] = half(val);
+        }
+    }
+}
