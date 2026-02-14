@@ -56,8 +56,9 @@ MNTensor softmax(const MNTensor& input, int64_t dim) {
     @autoreleasepool {
         MNDevice& device = MNDevice::instance();
 
-        // Allocate output buffer
-        MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device);
+        // Allocate output buffer (GPU-only when preferred)
+        StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
+        MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device, out_mode);
 
         uint32_t outer_size, reduce_size, inner_size;
         compute_reduction_sizes(input.shape(), dim, outer_size, reduce_size, inner_size);
@@ -182,8 +183,9 @@ MNTensor log_softmax(const MNTensor& input, int64_t dim) {
     @autoreleasepool {
         MNDevice& device = MNDevice::instance();
 
-        // Allocate output buffer
-        MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device);
+        // Allocate output buffer (GPU-only when preferred)
+        StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
+        MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device, out_mode);
 
         uint32_t outer_size, reduce_size, inner_size;
         compute_reduction_sizes(input.shape(), dim, outer_size, reduce_size, inner_size);

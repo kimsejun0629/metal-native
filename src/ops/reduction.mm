@@ -59,7 +59,8 @@ MNTensor dispatch_reduction(const MNTensor& input,
 
     // Compute output shape
     MNShape output_shape = compute_reduction_shape(input.shape(), dim, keepdim);
-    MNTensor output = MNTensor::empty(output_shape, output_dtype, device);
+    StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
+    MNTensor output = MNTensor::empty(output_shape, output_dtype, device, out_mode);
 
     // Compute reduction parameters
     int64_t outer_size = 1;

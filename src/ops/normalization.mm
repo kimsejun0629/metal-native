@@ -41,7 +41,8 @@ MNTensor layer_norm(const MNTensor& input,
 
     @autoreleasepool {
         MNDevice& device = MNDevice::instance();
-        MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device);
+        StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
+        MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device, out_mode);
 
         // Kernel selection strategy:
         // - norm_size >= 2048: "large" kernels with 256 threads (8 SIMD groups) per row.
@@ -136,7 +137,8 @@ MNTensor rms_norm(const MNTensor& input,
 
     @autoreleasepool {
         MNDevice& device = MNDevice::instance();
-        MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device);
+        StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
+        MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device, out_mode);
 
         // Kernel selection: same strategy as layer_norm
         const bool use_large = (norm_size >= 2048);
@@ -239,7 +241,8 @@ MNTensor batch_norm(const MNTensor& input,
 
     @autoreleasepool {
         MNDevice& device = MNDevice::instance();
-        MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device);
+        StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
+        MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device, out_mode);
 
         CommandPipeline& cmd_pipeline = device.command_pipeline();
         id<MTLCommandBuffer> cmd_buffer = cmd_pipeline.current_buffer();
@@ -343,7 +346,8 @@ MNTensor group_norm(const MNTensor& input,
 
     @autoreleasepool {
         MNDevice& device = MNDevice::instance();
-        MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device);
+        StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
+        MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device, out_mode);
 
         const char* kernel_name = nullptr;
         if (input.dtype() == MNDType::Float32) {

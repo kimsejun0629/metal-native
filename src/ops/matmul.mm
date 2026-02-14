@@ -15,6 +15,7 @@
 #include "metal_native/graph/graph_cache.h"
 #include "metal_native/memory/budget_controller.h"
 #include "metal_native/dispatch/command_pipeline.h"
+#include "metal_native/kernels/kernel_registry.h"
 
 #include <atomic>
 #include <mutex>
@@ -26,6 +27,7 @@ namespace metal_native {
 namespace {
 
 constexpr int64_t kSmallTensorThreshold = 65536; // elements
+constexpr int64_t kSIMDMatmulMaxDim = 2048; // max dimension for custom SIMD kernel
 
 MPSDataType to_mps_datatype(MNDType dtype) {
     switch (dtype) {
@@ -139,6 +141,127 @@ bool should_use_cpu_path(const MNTensor& a, const MNTensor& b) {
     return (a.numel() < kSmallTensorThreshold && b.numel() < kSmallTensorThreshold);
 }
 
+bool should_use_simd_kernel(int64_t M, int64_t N, int64_t K, MNDType dtype) {
+    // Use custom SIMD kernel for medium-sized matrices that benefit from
+    // avoiding MPSGraph overhead while being large enough to amortize GPU dispatch
+    return (M <= kSIMDMatmulMaxDim && N <= kSIMDMatmulMaxDim && K <= kSIMDMatmulMaxDim) &&
+           (dtype == MNDType::Float16 || dtype == MNDType::Float32);
+}
+
+MNTensor matmul_simd(const MNTensor& a, const MNTensor& b,
+                     bool transpose_a, bool transpose_b,
+                     int64_t M, int64_t N, int64_t K, MNDevice& device) {
+    @autoreleasepool {
+        // Compute output shape
+        std::vector<int64_t> output_dims;
+        for (size_t i = 0; i < a.ndim() - 2; ++i) {
+            output_dims.push_back(a.shape()[static_cast<int64_t>(i)]);
+        }
+        output_dims.push_back(M);
+        output_dims.push_back(N);
+        MNShape output_shape(output_dims);
+
+        // Allocate output tensor (GPU-only when preferred)
+        StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
+        MNTensor result = MNTensor::empty(output_shape, a.dtype(), device, out_mode);
+
+        // Select kernel based on dtype and batching
+        const char* kernel_name = nullptr;
+        int64_t batch_size = 1;
+        for (size_t i = 0; i < a.ndim() - 2; ++i) {
+            batch_size *= a.shape()[static_cast<int64_t>(i)];
+        }
+
+        if (batch_size > 1) {
+            if (a.dtype() == MNDType::Float16) {
+                kernel_name = "matmul_simd_batched_fp16";
+            } else {
+                kernel_name = "matmul_simd_batched_fp32";
+            }
+        } else {
+            if (a.dtype() == MNDType::Float16) {
+                kernel_name = "matmul_simd_fp16";
+            } else {
+                kernel_name = "matmul_simd_fp32";
+            }
+        }
+
+        KernelRegistry& registry = KernelRegistry::instance();
+        id<MTLComputePipelineState> pipeline = registry.get_pipeline(kernel_name);
+
+        // Setup command encoding
+        CommandPipeline& cmd_pipeline = device.command_pipeline();
+        id<MTLCommandBuffer> cmd_buffer = cmd_pipeline.current_buffer();
+        id<MTLComputeCommandEncoder> encoder = [cmd_buffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:pipeline];
+
+        // Bind buffers
+        [encoder setBuffer:a.buffer()->metal_buffer() offset:0 atIndex:0];
+        [encoder setBuffer:b.buffer()->metal_buffer() offset:0 atIndex:1];
+        [encoder setBuffer:result.buffer()->metal_buffer() offset:0 atIndex:2];
+
+        // Set matrix dimensions
+        uint32_t M_u32 = static_cast<uint32_t>(M);
+        uint32_t N_u32 = static_cast<uint32_t>(N);
+        uint32_t K_u32 = static_cast<uint32_t>(K);
+        [encoder setBytes:&M_u32 length:sizeof(uint32_t) atIndex:3];
+        [encoder setBytes:&N_u32 length:sizeof(uint32_t) atIndex:4];
+        [encoder setBytes:&K_u32 length:sizeof(uint32_t) atIndex:5];
+
+        // Set leading dimensions (row-major, so lda = cols of A)
+        uint32_t lda = static_cast<uint32_t>(a.shape()[a.ndim() - 1]);
+        uint32_t ldb = static_cast<uint32_t>(b.shape()[b.ndim() - 1]);
+        uint32_t ldc = static_cast<uint32_t>(N);
+        [encoder setBytes:&lda length:sizeof(uint32_t) atIndex:6];
+        [encoder setBytes:&ldb length:sizeof(uint32_t) atIndex:7];
+        [encoder setBytes:&ldc length:sizeof(uint32_t) atIndex:8];
+
+        // Set transpose flags
+        [encoder setBytes:&transpose_a length:sizeof(bool) atIndex:9];
+        [encoder setBytes:&transpose_b length:sizeof(bool) atIndex:10];
+
+        // For batched kernels, set batch strides
+        if (batch_size > 1) {
+            uint32_t batch_stride_a = static_cast<uint32_t>(
+                a.shape()[a.ndim() - 2] * a.shape()[a.ndim() - 1]);
+            uint32_t batch_stride_b = static_cast<uint32_t>(
+                b.shape()[b.ndim() - 2] * b.shape()[b.ndim() - 1]);
+            uint32_t batch_stride_c = static_cast<uint32_t>(M * N);
+            [encoder setBytes:&batch_stride_a length:sizeof(uint32_t) atIndex:11];
+            [encoder setBytes:&batch_stride_b length:sizeof(uint32_t) atIndex:12];
+            [encoder setBytes:&batch_stride_c length:sizeof(uint32_t) atIndex:13];
+        }
+
+        // Set threadgroup memory sizes
+        // shared_A: TILE_M * TILE_K * element_size
+        // shared_B: TILE_K * TILE_N * element_size
+        constexpr uint32_t TILE_M = 32;
+        constexpr uint32_t TILE_K = 32;
+        constexpr uint32_t TILE_N = 32;
+        size_t element_size = (a.dtype() == MNDType::Float16) ? 2 : 4;
+        [encoder setThreadgroupMemoryLength:(TILE_M * TILE_K * element_size) atIndex:0];
+        [encoder setThreadgroupMemoryLength:(TILE_K * TILE_N * element_size) atIndex:1];
+
+        // Dispatch threadgroups
+        // Grid: (ceil(N/32), ceil(M/32), batch_size)
+        // Threadgroup: (128, 1, 1) = 4 SIMD groups of 32 threads
+        MTLSize grid_size = MTLSizeMake(
+            (N + TILE_N - 1) / TILE_N,
+            (M + TILE_M - 1) / TILE_M,
+            batch_size
+        );
+        MTLSize threadgroup_size = MTLSizeMake(128, 1, 1);
+
+        [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:threadgroup_size];
+        [encoder endEncoding];
+
+        cmd_pipeline.commit_and_continue();
+
+        return result;
+    }
+}
+
 MNTensor matmul_cpu(const MNTensor& a, const MNTensor& b,
                     bool transpose_a, bool transpose_b, MNDevice& device) {
     // Only FP32 for CPU path (fall through for FP16/BF16)
@@ -231,6 +354,15 @@ MNTensor matmul(const MNTensor& a,
         a.is_contiguous() && b.is_contiguous()) {
         MNDevice& device = MNDevice::instance();
         return matmul_cpu(a, b, transpose_a, transpose_b, device);
+    }
+
+    // Custom SIMD kernel path for medium-sized matrices
+    // Avoids MPSGraph overhead (~50-100μs) for matrices where M,N,K ≤ 2048
+    int64_t K = K_a; // K_a == K_b already validated
+    if (should_use_simd_kernel(M, N, K, a.dtype()) &&
+        a.is_contiguous() && b.is_contiguous()) {
+        MNDevice& device = MNDevice::instance();
+        return matmul_simd(a, b, transpose_a, transpose_b, M, N, K, device);
     }
 
     @autoreleasepool {
@@ -374,8 +506,9 @@ MNTensor matmul(const MNTensor& a,
         output_dims.push_back(N);
         MNShape output_shape(output_dims);
 
-        // Allocate output tensor
-        MNTensor result = MNTensor::empty(output_shape, a.dtype(), device);
+        // Allocate output tensor (GPU-only when preferred)
+        StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
+        MNTensor result = MNTensor::empty(output_shape, a.dtype(), device, out_mode);
 
         // Create result tensor data backed by our output buffer so MPSGraph
         // writes directly into it (zero-copy output).

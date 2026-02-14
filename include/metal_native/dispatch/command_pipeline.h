@@ -27,6 +27,8 @@ class MNDevice;
 
 class CommandPipeline {
 public:
+    // Forward declaration for RAII batch scope
+    class BatchScope;
     /// Construct a pipeline backed by the given device.
     ///
     /// @param device        The MNDevice that owns the command queue.
@@ -98,6 +100,34 @@ public:
     /// Flush: commit the current buffer if one is active (even in lazy mode).
     void flush();
 
+    // -- Batch scoping -------------------------------------------------------
+
+    /// Create a RAII batch scope that groups operations into a single command buffer.
+    ///
+    /// On construction, the scope enables lazy_commit mode. On destruction,
+    /// it flushes accumulated commands and restores the previous lazy_commit state.
+    ///
+    /// Usage:
+    ///   {
+    ///       auto scope = pipeline.batch_scope();
+    ///       // Multiple operations accumulate in one command buffer
+    ///       op1();
+    ///       op2();
+    ///       op3();
+    ///   } // flush happens here automatically
+    BatchScope batch_scope();
+
+    // -- Operation counting --------------------------------------------------
+
+    /// Increment the operation counter. When the count reaches the auto-flush
+    /// threshold, the current buffer is flushed even in lazy mode.
+    /// This prevents command buffers from growing unboundedly.
+    void record_op();
+
+    /// Set the maximum number of operations before auto-flush (default: 64).
+    void set_auto_flush_threshold(size_t threshold);
+    size_t auto_flush_threshold() const noexcept;
+
     // -- Queries -------------------------------------------------------------
 
     /// Number of committed-but-not-completed buffers currently in flight.
@@ -109,6 +139,32 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+};
+
+// ---------------------------------------------------------------------------
+// BatchScope RAII guard
+// ---------------------------------------------------------------------------
+
+/// RAII guard that enables lazy commit mode for the lifetime of the scope.
+/// On construction, enables lazy_commit. On destruction, flushes the
+/// accumulated commands and restores the previous lazy_commit state.
+///
+/// Nested scopes are supported: inner scopes save/restore the lazy state
+/// set by outer scopes, and all flushes happen at the appropriate nesting level.
+class CommandPipeline::BatchScope {
+public:
+    explicit BatchScope(CommandPipeline& pipeline);
+    ~BatchScope();
+
+    // Non-copyable, non-movable
+    BatchScope(const BatchScope&) = delete;
+    BatchScope& operator=(const BatchScope&) = delete;
+    BatchScope(BatchScope&&) = delete;
+    BatchScope& operator=(BatchScope&&) = delete;
+
+private:
+    CommandPipeline& pipeline_;
+    bool previous_lazy_state_;
 };
 
 } // namespace metal_native

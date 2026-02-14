@@ -85,13 +85,17 @@ MNTensor flash_attention(const MNTensor& query,
     @autoreleasepool {
         MNDevice& device = MNDevice::instance();
 
-        // Allocate output tensor
-        MNTensor output = MNTensor::empty(query.shape(), query.dtype(), device);
+        // Allocate output tensor (GPU-only when preferred for reduced TLB pressure)
+        StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
+        MNTensor output = MNTensor::empty(query.shape(), query.dtype(), device, out_mode);
 
         // Select kernel based on dtype (use SIMD versions for AMX acceleration)
         const char* kernel_name = nullptr;
+        MTLSize threadgroup_size;
+
         if (query.dtype() == MNDType::Float32) {
             kernel_name = "flash_attention_simd_kernel";
+            threadgroup_size = MTLSizeMake(32, 1, 1);  // 1 SIMD group
         } else if (query.dtype() == MNDType::Float16) {
             // Use larger tile when head_dim fits in 32KB threadgroup memory
             // and memory pressure is normal (budget allows performance optimization)
@@ -102,10 +106,22 @@ MNTensor flash_attention(const MNTensor& query,
             // At Warning or Critical pressure, conserve threadgroup memory
             bool use_tile24 = (head_dim <= 128 && pressure_mult >= 1.0f);
 
+            // Use multi-SIMD kernel for FP16 when sequence length benefits from parallelism
+            // The multi-SIMD variant uses 2 SIMD groups (64 threads) for:
+            // - 2x faster cooperative K/V tile loading
+            // - Parallel computation of 8x16 score blocks
+            // Memory footprint is identical to tile16 (17,408 bytes)
+            bool use_multi_simd = (seq_len_k >= 64);  // Benefit from parallelism
+
             if (use_tile24) {
                 kernel_name = "flash_attention_simd_kernel_fp16_tile24";
+                threadgroup_size = MTLSizeMake(32, 1, 1);  // 1 SIMD group
+            } else if (use_multi_simd) {
+                kernel_name = "flash_attention_simd_kernel_fp16_multi";
+                threadgroup_size = MTLSizeMake(64, 1, 1);  // 2 SIMD groups
             } else {
                 kernel_name = "flash_attention_simd_kernel_fp16";
+                threadgroup_size = MTLSizeMake(32, 1, 1);  // 1 SIMD group
             }
         } else {
             MN_THROW(MetalNativeError::InvalidArgument,
@@ -175,12 +191,10 @@ MNTensor flash_attention(const MNTensor& query,
         [encoder setThreadgroupMemoryLength:active_tile_size * head_dim * sizeof(float) atIndex:3];
 
         // Dispatch threadgroups for SIMD kernel
-        // SIMD kernel uses one SIMD group (32 threads) per threadgroup
         // Grid: [num_q_tiles, num_heads, batch]
         uint32_t num_q_tiles = (seq_len_q + active_tile_size - 1) / active_tile_size;
 
         MTLSize grid_size = MTLSizeMake(num_q_tiles, num_heads, batch);
-        MTLSize threadgroup_size = MTLSizeMake(32, 1, 1);  // One SIMD group per threadgroup
 
         [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:threadgroup_size];
 

@@ -853,3 +853,247 @@ kernel void flash_attention_simd_kernel_fp16_tile24(
         }
     }
 }
+
+/// FlashAttention kernel using 2 SIMD groups (64 threads) for FP16
+/// Each SIMD group handles 8 rows of the 16x16 tile independently
+///
+/// Memory layout (same as single-SIMD tile16):
+/// - shared_Q: [16, head_dim] FP16
+/// - shared_KV: [16, head_dim] FP16 (K then V, aliased)
+/// - shared_scores: [16, 16] FP32 for numerical stability
+/// - shared_output: [16, head_dim] FP32 accumulation
+/// Total: 17,408 bytes (fits in 32KB limit)
+///
+/// Threadgroup: 64 threads (two SIMD groups)
+/// Grid: [num_q_tiles, num_heads, batch]
+///
+/// Parallelization:
+/// - SIMD group 0: Q rows 0-7 (top half of score matrix)
+/// - SIMD group 1: Q rows 8-15 (bottom half of score matrix)
+/// - Both groups cooperatively load K/V tiles (2x faster)
+/// - Each group independently computes its 8x16 score block
+/// - No merge needed: each group handles its rows independently
+kernel void flash_attention_simd_kernel_fp16_multi(
+    device const half* Q                [[buffer(0)]],
+    device const half* K                [[buffer(1)]],
+    device const half* V                [[buffer(2)]],
+    device const half* mask             [[buffer(3)]],
+    device half* output                 [[buffer(4)]],
+    constant uint& batch                [[buffer(5)]],
+    constant uint& num_heads            [[buffer(6)]],
+    constant uint& seq_len_q            [[buffer(7)]],
+    constant uint& seq_len_k            [[buffer(8)]],
+    constant uint& head_dim             [[buffer(9)]],
+    constant float& scale               [[buffer(10)]],
+    constant bool& has_mask             [[buffer(11)]],
+    threadgroup half* shared_Q          [[threadgroup(0)]],
+    threadgroup half* shared_KV         [[threadgroup(1)]],  // K then V (aliased)
+    threadgroup float* shared_scores    [[threadgroup(2)]],  // FP32 for numerical stability
+    threadgroup float* shared_output    [[threadgroup(3)]],  // FP32 accumulation
+    uint3 gid                           [[threadgroup_position_in_grid]],
+    uint  simd_lane_id                  [[thread_index_in_simdgroup]],
+    uint  simd_group_id                 [[simdgroup_index_in_threadgroup]]
+) {
+    const uint b = gid.z;
+    const uint h = gid.y;
+    const uint q_tile_idx = gid.x;
+
+    if (b >= batch || h >= num_heads) return;
+
+    const uint q_start = q_tile_idx * TILE_SIZE;
+    const uint qkv_offset = (b * num_heads + h) * seq_len_q * head_dim;
+    const uint k_offset = (b * num_heads + h) * seq_len_k * head_dim;
+
+    // Cooperative loading of Q tile (64 threads)
+    for (uint idx = simd_group_id * 32 + simd_lane_id; idx < TILE_SIZE * head_dim; idx += 64) {
+        uint row = idx / head_dim;
+        uint col = idx % head_dim;
+        uint q_idx = q_start + row;
+        if (q_idx < seq_len_q) {
+            shared_Q[row * head_dim + col] = Q[qkv_offset + q_idx * head_dim + col];
+        } else {
+            shared_Q[row * head_dim + col] = half(0.0f);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Initialize FP32 output accumulator
+    for (uint idx = simd_group_id * 32 + simd_lane_id; idx < TILE_SIZE * head_dim; idx += 64) {
+        shared_output[idx] = 0.0f;
+    }
+
+    // Online softmax state for each SIMD group's rows
+    threadgroup OnlineSoftmaxState softmax_states[TILE_SIZE];
+    const uint row_start = simd_group_id * 8;  // Each group handles 8 rows
+
+    if (simd_lane_id < 8) {
+        uint row_idx = row_start + simd_lane_id;
+        softmax_states[row_idx].max_val = -INFINITY;
+        softmax_states[row_idx].sum_exp = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint num_k_tiles = (seq_len_k + TILE_SIZE - 1) / TILE_SIZE;
+
+    for (uint k_tile_idx = 0; k_tile_idx < num_k_tiles; k_tile_idx++) {
+        const uint k_start = k_tile_idx * TILE_SIZE;
+        const uint k_end = min(k_start + TILE_SIZE, seq_len_k);
+        const uint k_tile_size = k_end - k_start;
+
+        // Cooperative load K tile (64 threads)
+        for (uint idx = simd_group_id * 32 + simd_lane_id; idx < TILE_SIZE * head_dim; idx += 64) {
+            uint row = idx / head_dim;
+            uint col = idx % head_dim;
+            uint k_idx = k_start + row;
+            if (k_idx < seq_len_k && row < k_tile_size) {
+                shared_KV[row * head_dim + col] = K[k_offset + k_idx * head_dim + col];
+            } else {
+                shared_KV[row * head_dim + col] = half(0.0f);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Compute Q @ K^T: each SIMD group handles one 8x16 block (1x2 in 8x8 tiles)
+        // SIMD group 0: rows 0-7, SIMD group 1: rows 8-15
+        simdgroup_half8x8 scores_0, scores_1;
+        scores_0 = simdgroup_half8x8(half(0.0f));
+        scores_1 = simdgroup_half8x8(half(0.0f));
+
+        for (uint d = 0; d < head_dim; d += 8) {
+            simdgroup_half8x8 q_block, k0, k1;
+            simdgroup_load(q_block, shared_Q + row_start * head_dim + d, head_dim);
+            simdgroup_load(k0, shared_KV + 0 * head_dim + d, head_dim);
+            simdgroup_load(k1, shared_KV + 8 * head_dim + d, head_dim);
+
+            simdgroup_multiply_accumulate(scores_0, q_block, k0, scores_0);
+            simdgroup_multiply_accumulate(scores_1, q_block, k1, scores_1);
+        }
+
+        // Store scores to shared memory via temporary half buffer
+        threadgroup half temp_scores_half[TILE_SIZE * TILE_SIZE];
+        simdgroup_store(scores_0, temp_scores_half + row_start * TILE_SIZE + 0, TILE_SIZE);
+        simdgroup_store(scores_1, temp_scores_half + row_start * TILE_SIZE + 8, TILE_SIZE);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Convert to FP32 and apply scaling/masking (each group handles its rows)
+        for (uint local_row = 0; local_row < 8; local_row++) {
+            uint row = row_start + local_row;
+            for (uint col = simd_lane_id; col < TILE_SIZE; col += 32) {
+                uint q_idx = q_start + row;
+                uint k_idx = k_start + col;
+
+                if (q_idx < seq_len_q && col < k_tile_size) {
+                    float score = float(temp_scores_half[row * TILE_SIZE + col]) * scale;
+                    if (has_mask) {
+                        score += float(mask[b * seq_len_q * seq_len_k + q_idx * seq_len_k + k_idx]);
+                    }
+                    shared_scores[row * TILE_SIZE + col] = score;
+                } else {
+                    shared_scores[row * TILE_SIZE + col] = -INFINITY;
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Update online softmax (each group handles its 8 rows)
+        if (simd_lane_id < 8) {
+            uint row = row_start + simd_lane_id;
+            uint q_idx = q_start + row;
+            if (q_idx < seq_len_q) {
+                float old_max = softmax_states[row].max_val;
+
+                for (uint k_local = 0; k_local < k_tile_size; k_local++) {
+                    float score = shared_scores[row * TILE_SIZE + k_local];
+                    softmax_states[row] = update_online_softmax(softmax_states[row], score);
+                }
+
+                if (softmax_states[row].max_val > old_max) {
+                    float rescale = exp(old_max - softmax_states[row].max_val);
+                    for (uint d = 0; d < head_dim; d++) {
+                        shared_output[row * head_dim + d] *= rescale;
+                    }
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Compute softmax weights (each group handles its rows)
+        for (uint local_row = 0; local_row < 8; local_row++) {
+            uint row = row_start + local_row;
+            for (uint col = simd_lane_id; col < TILE_SIZE; col += 32) {
+                uint q_idx = q_start + row;
+
+                if (q_idx < seq_len_q && col < k_tile_size) {
+                    float score = shared_scores[row * TILE_SIZE + col];
+                    shared_scores[row * TILE_SIZE + col] = exp(score - softmax_states[row].max_val);
+                } else {
+                    shared_scores[row * TILE_SIZE + col] = 0.0f;
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Cooperative load V tile (64 threads)
+        for (uint idx = simd_group_id * 32 + simd_lane_id; idx < TILE_SIZE * head_dim; idx += 64) {
+            uint row = idx / head_dim;
+            uint col = idx % head_dim;
+            uint v_idx = k_start + row;
+            if (v_idx < seq_len_k && row < k_tile_size) {
+                shared_KV[row * head_dim + col] = V[k_offset + v_idx * head_dim + col];
+            } else {
+                shared_KV[row * head_dim + col] = half(0.0f);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Accumulate weighted V (each SIMD group handles its 8 rows)
+        // Process head_dim in blocks of 16 (2x 8x8 blocks)
+        for (uint d_block = 0; d_block < head_dim; d_block += 16) {
+            simdgroup_float8x8 out_0, out_1;
+
+            simdgroup_load(out_0, shared_output + row_start * head_dim + d_block + 0, head_dim);
+            simdgroup_load(out_1, shared_output + row_start * head_dim + d_block + 8, head_dim);
+
+            // Convert weights to FP16
+            threadgroup half temp_weights_half[TILE_SIZE * TILE_SIZE];
+            for (uint i = simd_group_id * 32 + simd_lane_id; i < TILE_SIZE * TILE_SIZE; i += 64) {
+                temp_weights_half[i] = half(shared_scores[i]);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            simdgroup_half8x8 w0, w1;
+            simdgroup_load(w0, temp_weights_half + row_start * TILE_SIZE + 0, TILE_SIZE);
+            simdgroup_load(w1, temp_weights_half + row_start * TILE_SIZE + 8, TILE_SIZE);
+
+            simdgroup_half8x8 v0_0, v0_1, v1_0, v1_1;
+            simdgroup_load(v0_0, shared_KV + 0 * head_dim + d_block + 0, head_dim);
+            simdgroup_load(v0_1, shared_KV + 0 * head_dim + d_block + 8, head_dim);
+            simdgroup_load(v1_0, shared_KV + 8 * head_dim + d_block + 0, head_dim);
+            simdgroup_load(v1_1, shared_KV + 8 * head_dim + d_block + 8, head_dim);
+
+            // Mixed precision: FP16 multiply with FP32 accumulate
+            simdgroup_multiply_accumulate(out_0, w0, v0_0, out_0);
+            simdgroup_multiply_accumulate(out_0, w1, v1_0, out_0);
+            simdgroup_multiply_accumulate(out_1, w0, v0_1, out_1);
+            simdgroup_multiply_accumulate(out_1, w1, v1_1, out_1);
+
+            simdgroup_store(out_0, shared_output + row_start * head_dim + d_block + 0, head_dim);
+            simdgroup_store(out_1, shared_output + row_start * head_dim + d_block + 8, head_dim);
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+
+    // Final normalization and write output as FP16 (each group handles its rows)
+    for (uint local_row = 0; local_row < 8; local_row++) {
+        uint row = row_start + local_row;
+        for (uint col = simd_lane_id; col < head_dim; col += 32) {
+            uint q_idx = q_start + row;
+
+            if (q_idx < seq_len_q) {
+                float normalized = shared_output[row * head_dim + col] / softmax_states[row].sum_exp;
+                output[qkv_offset + q_idx * head_dim + col] = half(normalized);
+            }
+        }
+    }
+}

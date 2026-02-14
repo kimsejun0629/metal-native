@@ -11,6 +11,7 @@
 /// Objective-C types are hidden behind `#ifdef __OBJC__` guards; the pure-C++
 /// surface exposes only opaque `void*` accessors that .mm callers can cast.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -86,6 +87,16 @@ public:
     /// Shared MetalSmartAllocator for pooled buffer allocation.
     MetalSmartAllocator& allocator();
 
+    // -- Storage Mode Preference ---------------------------------------------
+
+    /// Enable/disable GPU-only (Private) storage for intermediate tensors.
+    /// When enabled, operation outputs use StorageMode::Private (no CPU access).
+    /// Default: false (for backward compatibility).
+    void set_prefer_private_storage(bool enable);
+
+    /// Check if GPU-only (Private) storage is preferred for intermediate tensors.
+    bool prefer_private_storage() const noexcept;
+
     // -- Non-copyable / non-movable ------------------------------------------
     MNDevice(const MNDevice&) = delete;
     MNDevice& operator=(const MNDevice&) = delete;
@@ -98,6 +109,7 @@ private:
 
     struct Impl;
     std::unique_ptr<Impl> impl_;
+    std::atomic<bool> prefer_private_storage_{false};
 };
 
 } // namespace metal_native

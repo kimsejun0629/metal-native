@@ -152,4 +152,12 @@ MetalSmartAllocator& MNDevice::allocator() {
     return *impl_->allocator_inst;
 }
 
+void MNDevice::set_prefer_private_storage(bool enable) {
+    prefer_private_storage_.store(enable, std::memory_order_relaxed);
+}
+
+bool MNDevice::prefer_private_storage() const noexcept {
+    return prefer_private_storage_.load(std::memory_order_relaxed);
+}
+
 } // namespace metal_native

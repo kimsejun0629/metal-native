@@ -30,7 +30,8 @@ MNTensor dispatch_binary_op(const MNTensor& a,
 
     // Compute broadcast shape
     MNShape output_shape = a.shape().broadcast_with(b.shape());
-    MNTensor output = MNTensor::empty(output_shape, a.dtype(), device);
+    StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
+    MNTensor output = MNTensor::empty(output_shape, a.dtype(), device, out_mode);
 
     const int64_t numel = output.numel();
 
@@ -86,7 +87,8 @@ MNTensor dispatch_unary_op(const MNTensor& x,
              MetalNativeError::InvalidArgument,
              "elementwise: input must be contiguous");
 
-    MNTensor output = MNTensor::empty(x.shape(), x.dtype(), device);
+    StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
+    MNTensor output = MNTensor::empty(x.shape(), x.dtype(), device, out_mode);
 
     const int64_t numel = x.numel();
 
@@ -171,7 +173,8 @@ MNTensor sqrt(const MNTensor& x, MNDevice& device) {
              MetalNativeError::InvalidArgument,
              "sqrt: input must be contiguous");
 
-    MNTensor output = MNTensor::empty(x.shape(), x.dtype(), device);
+    StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
+    MNTensor output = MNTensor::empty(x.shape(), x.dtype(), device, out_mode);
     const int64_t numel = x.numel();
 
     @autoreleasepool {
@@ -233,7 +236,8 @@ MNTensor clamp(const MNTensor& x, float min_val, float max_val, MNDevice& device
              MetalNativeError::InvalidArgument,
              "clamp: input must be contiguous");
 
-    MNTensor output = MNTensor::empty(x.shape(), x.dtype(), device);
+    StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
+    MNTensor output = MNTensor::empty(x.shape(), x.dtype(), device, out_mode);
     const int64_t numel = x.numel();
 
     @autoreleasepool {
@@ -301,7 +305,8 @@ MNTensor where(const MNTensor& condition,
     MNShape shape1 = condition.shape().broadcast_with(x.shape());
     MNShape output_shape = shape1.broadcast_with(y.shape());
 
-    MNTensor output = MNTensor::empty(output_shape, x.dtype(), device);
+    StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
+    MNTensor output = MNTensor::empty(output_shape, x.dtype(), device, out_mode);
     const int64_t numel = output.numel();
 
     @autoreleasepool {

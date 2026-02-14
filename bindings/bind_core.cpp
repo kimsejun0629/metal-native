@@ -39,6 +39,8 @@ std::string device_name();
 bool is_available();
 bool supports_bfloat16();
 py::dict device_properties();
+void set_prefer_private_storage(bool enable);
+bool prefer_private_storage();
 
 // Initialization
 void initialize();
@@ -169,6 +171,11 @@ PYBIND11_MODULE(_C, m) {
                      "Check if bfloat16 is supported");
     device_module.def("properties", &python::device_properties,
                      "Get device properties dictionary");
+    device_module.def("set_prefer_private_storage", &python::set_prefer_private_storage,
+                     "Enable/disable GPU-only (Private) storage for intermediate tensors",
+                     py::arg("enable"));
+    device_module.def("prefer_private_storage", &python::prefer_private_storage,
+                     "Check if GPU-only (Private) storage is preferred for intermediate tensors");
 
     // Top-level aliases (used by Python wrapper device.py)
     m.def("device_name", &python::device_name,
@@ -402,6 +409,14 @@ size_t max_memory_allocated() {
 
 void reset_peak_stats() {
     // TODO: Reset peak memory tracking
+}
+
+void set_prefer_private_storage(bool enable) {
+    MNDevice::instance().set_prefer_private_storage(enable);
+}
+
+bool prefer_private_storage() {
+    return MNDevice::instance().prefer_private_storage();
 }
 
 void set_seed(int64_t seed) {

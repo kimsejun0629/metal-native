@@ -29,6 +29,10 @@ struct CommandPipeline::Impl {
     bool                    has_active    = false;
     std::atomic<bool>       lazy_commit{false};
 
+    // Operation counting for auto-flush
+    std::atomic<size_t>     op_count{0};
+    std::atomic<size_t>     auto_flush_threshold{64};
+
     explicit Impl(MNDevice& dev, size_t count)
         : device(dev)
         , buffer_count(count)
@@ -78,10 +82,17 @@ id<MTLCommandBuffer> CommandPipeline::current_buffer() {
 }
 
 void CommandPipeline::commit_and_continue() {
-    // In lazy mode, skip the commit — operations accumulate in the
-    // current buffer until synchronize() or flush() is called.
-    // This matches PyTorch MPS behavior of batching many ops per submit.
-    if (impl_->lazy_commit) return;
+    // Count this operation
+    size_t count = ++impl_->op_count;
+
+    // In lazy mode, check auto-flush threshold
+    if (impl_->lazy_commit) {
+        if (count >= impl_->auto_flush_threshold) {
+            flush();
+            impl_->op_count = 0;
+        }
+        return;
+    }
 
     // Acquire a backpressure slot BEFORE locking the mutex to prevent starvation.
     // If backpressure blocks (all slots full), we don't want to hold impl_->mu.
@@ -104,6 +115,9 @@ void CommandPipeline::commit_and_continue() {
 
     // Create next buffer immediately for continued encoding.
     impl_->active_buffer = impl_->create_buffer();
+
+    // Reset operation counter after commit
+    impl_->op_count = 0;
 }
 
 void CommandPipeline::commit() {
@@ -128,6 +142,9 @@ void CommandPipeline::commit() {
 
     impl_->active_buffer = nil;
     impl_->has_active    = false;
+
+    // Reset operation counter after commit
+    impl_->op_count = 0;
 }
 
 void CommandPipeline::synchronize() {
@@ -201,6 +218,50 @@ void CommandPipeline::flush() {
 
     // Create next buffer for continued encoding.
     impl_->active_buffer = impl_->create_buffer();
+
+    // Reset operation counter after flush
+    impl_->op_count = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Operation counting
+// ---------------------------------------------------------------------------
+
+void CommandPipeline::record_op() {
+    size_t count = ++impl_->op_count;
+    // Auto-flush when threshold reached (only in lazy mode)
+    if (impl_->lazy_commit && count >= impl_->auto_flush_threshold) {
+        flush();
+        impl_->op_count = 0;
+    }
+}
+
+void CommandPipeline::set_auto_flush_threshold(size_t threshold) {
+    impl_->auto_flush_threshold = threshold;
+}
+
+size_t CommandPipeline::auto_flush_threshold() const noexcept {
+    return impl_->auto_flush_threshold;
+}
+
+// ---------------------------------------------------------------------------
+// BatchScope RAII guard
+// ---------------------------------------------------------------------------
+
+CommandPipeline::BatchScope::BatchScope(CommandPipeline& pipeline)
+    : pipeline_(pipeline)
+    , previous_lazy_state_(pipeline.lazy_commit())
+{
+    pipeline_.set_lazy_commit(true);
+}
+
+CommandPipeline::BatchScope::~BatchScope() {
+    pipeline_.flush();
+    pipeline_.set_lazy_commit(previous_lazy_state_);
+}
+
+CommandPipeline::BatchScope CommandPipeline::batch_scope() {
+    return BatchScope(*this);
 }
 
 } // namespace metal_native
