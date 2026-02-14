@@ -92,9 +92,30 @@ MNTensor QuantWeightCache::get_dequantized(const std::string& name) {
     MNTensor dequantized_tensor = MNTensor::empty(output_shape, MNDType::Float16, impl_->device);
 
     @autoreleasepool {
-        const char* kernel_name = (entry.format == QuantFormat::INT8)
-            ? "dequantize_int8_to_fp16"
-            : "dequantize_int4_to_fp16";
+        // Select kernel based on size and alignment
+        const char* kernel_name;
+        size_t grid_size_count;
+
+        if (entry.format == QuantFormat::INT8) {
+            // Use vectorized kernel if num_elements >= 128 and divisible by 8
+            if (entry.num_elements >= 128 && (entry.num_elements % 8) == 0) {
+                kernel_name = "dequantize_int8_to_fp16_vec";
+                grid_size_count = (entry.num_elements + 7) / 8;  // 8 elements per thread
+            } else {
+                kernel_name = "dequantize_int8_to_fp16";
+                grid_size_count = entry.num_elements;  // 1 element per thread
+            }
+        } else {  // INT4
+            size_t num_bytes = entry.quantized.numel();
+            // Use vectorized kernel if num_bytes >= 8 and divisible by 8
+            if (num_bytes >= 8 && (num_bytes % 8) == 0) {
+                kernel_name = "dequantize_int4_to_fp16_vec";
+                grid_size_count = (num_bytes + 7) / 8;  // 8 bytes (16 elements) per thread
+            } else {
+                kernel_name = "dequantize_int4_to_fp16";
+                grid_size_count = num_bytes;  // 1 byte (2 elements) per thread
+            }
+        }
 
         id<MTLComputePipelineState> pipeline = KernelRegistry::instance().get_pipeline(kernel_name);
 
@@ -112,7 +133,7 @@ MNTensor QuantWeightCache::get_dequantized(const std::string& name) {
         [encoder setBytes:&num_elements length:sizeof(uint32_t) atIndex:3];
         [encoder setBytes:&group_size length:sizeof(uint32_t) atIndex:4];
 
-        MTLSize grid_size = MTLSizeMake(entry.num_elements, 1, 1);
+        MTLSize grid_size = MTLSizeMake(grid_size_count, 1, 1);
         MTLSize threadgroup_size = MTLSizeMake(
             std::min<NSUInteger>(256, pipeline.maxTotalThreadsPerThreadgroup), 1, 1);
 

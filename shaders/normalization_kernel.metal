@@ -1261,3 +1261,94 @@ kernel void layer_norm_large_regcache_fp16(
         cache_idx++;
     }
 }
+
+// ============================================================================
+// BFloat16 Normalization Kernels
+// ============================================================================
+// BFloat16 is stored as ushort in Metal buffers. All computation happens in
+// FP32 with conversion at memory boundaries.
+
+kernel void layer_norm_kernel_bf16(
+    device const ushort* input      [[buffer(0)]],
+    device const ushort* weight     [[buffer(1)]],
+    device const ushort* bias       [[buffer(2)]],
+    device ushort* output           [[buffer(3)]],
+    constant uint& batch_size       [[buffer(4)]],
+    constant uint& norm_size        [[buffer(5)]],
+    constant float& eps             [[buffer(6)]],
+    uint2 gid                       [[thread_position_in_grid]],
+    uint  simd_lane_id              [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = gid.y;
+
+    if (batch_idx >= batch_size) return;
+
+    const uint base_offset = batch_idx * norm_size;
+    const uint lane = gid.x;  // 0..31
+
+    // Cooperative statistics computation with FP32 accumulation
+    float partial_sum = 0.0f;
+    float partial_sq_sum = 0.0f;
+
+    for (uint i = lane; i < norm_size; i += 32) {
+        float val = bf16_to_float(input[base_offset + i]);
+        partial_sum += val;
+        partial_sq_sum += val * val;
+    }
+
+    // SIMD reduction to get totals across all 32 threads
+    float total_sum = simd_sum(partial_sum);
+    float total_sq_sum = simd_sum(partial_sq_sum);
+
+    float mean = total_sum / float(norm_size);
+    float variance = total_sq_sum / float(norm_size) - mean * mean;
+    float inv_std = 1.0f / sqrt(variance + eps);
+
+    // Normalize and apply affine transform (all 32 threads participate)
+    for (uint i = lane; i < norm_size; i += 32) {
+        float val = bf16_to_float(input[base_offset + i]);
+        float w = bf16_to_float(weight[i]);
+        float b = bf16_to_float(bias[i]);
+        float normalized = (val - mean) * inv_std;
+        output[base_offset + i] = float_to_bf16(normalized * w + b);
+    }
+}
+
+kernel void rms_norm_kernel_bf16(
+    device const ushort* input      [[buffer(0)]],
+    device const ushort* weight     [[buffer(1)]],
+    device ushort* output           [[buffer(2)]],
+    constant uint& batch_size       [[buffer(3)]],
+    constant uint& norm_size        [[buffer(4)]],
+    constant float& eps             [[buffer(5)]],
+    uint2 gid                       [[thread_position_in_grid]],
+    uint  simd_lane_id              [[thread_index_in_simdgroup]]
+) {
+    const uint batch_idx = gid.y;
+
+    if (batch_idx >= batch_size) return;
+
+    const uint base_offset = batch_idx * norm_size;
+    const uint lane = gid.x;  // 0..31
+
+    // Cooperative RMS computation with FP32 accumulation
+    float partial_sq_sum = 0.0f;
+
+    for (uint i = lane; i < norm_size; i += 32) {
+        float val = bf16_to_float(input[base_offset + i]);
+        partial_sq_sum += val * val;
+    }
+
+    // SIMD reduction to get total across all 32 threads
+    float total_sq_sum = simd_sum(partial_sq_sum);
+
+    float rms = sqrt(total_sq_sum / float(norm_size) + eps);
+    float inv_rms = 1.0f / rms;
+
+    // Normalize and apply weight (all 32 threads participate)
+    for (uint i = lane; i < norm_size; i += 32) {
+        float val = bf16_to_float(input[base_offset + i]);
+        float w = bf16_to_float(weight[i]);
+        output[base_offset + i] = float_to_bf16(val * inv_rms * w);
+    }
+}

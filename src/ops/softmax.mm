@@ -74,9 +74,12 @@ MNTensor softmax(const MNTensor& input, int64_t dim) {
                 kernel_name = "softmax_large_vec4_fp32";
             } else if (input.dtype() == MNDType::Float16) {
                 kernel_name = "softmax_large_vec4_fp16";
+            } else if (input.dtype() == MNDType::BFloat16) {
+                // BFloat16: fallback to online kernel (no large/vec4 variants)
+                kernel_name = "softmax_online_bf16";
             } else {
                 MN_THROW(MetalNativeError::InvalidArgument,
-                         "softmax: unsupported dtype (only Float32 and Float16)");
+                         "softmax: unsupported dtype (only Float32, Float16, and BFloat16)");
             }
         } else if (use_large) {
             // Use 256-thread large scalar kernel for very large non-contiguous reductions
@@ -84,9 +87,12 @@ MNTensor softmax(const MNTensor& input, int64_t dim) {
                 kernel_name = "softmax_large_fp32";
             } else if (input.dtype() == MNDType::Float16) {
                 kernel_name = "softmax_large_fp16";
+            } else if (input.dtype() == MNDType::BFloat16) {
+                // BFloat16: fallback to online kernel (no large variants)
+                kernel_name = "softmax_online_bf16";
             } else {
                 MN_THROW(MetalNativeError::InvalidArgument,
-                         "softmax: unsupported dtype (only Float32 and Float16)");
+                         "softmax: unsupported dtype (only Float32, Float16, and BFloat16)");
             }
         } else if (use_vec4 && reduce_size >= 128) {
             // Use SIMD-cooperative vec4 kernel for medium contiguous reductions
@@ -104,9 +110,12 @@ MNTensor softmax(const MNTensor& input, int64_t dim) {
                 kernel_name = "softmax_online_vec4_fp32";
             } else if (input.dtype() == MNDType::Float16) {
                 kernel_name = "softmax_online_vec4_fp16";
+            } else if (input.dtype() == MNDType::BFloat16) {
+                // BFloat16: fallback to online kernel (no vec4 variants)
+                kernel_name = "softmax_online_bf16";
             } else {
                 MN_THROW(MetalNativeError::InvalidArgument,
-                         "softmax: unsupported dtype (only Float32 and Float16)");
+                         "softmax: unsupported dtype (only Float32, Float16, and BFloat16)");
             }
         } else if (reduce_size >= 32) {
             // Use SIMD-cooperative kernel for medium non-contiguous reductions
@@ -114,9 +123,12 @@ MNTensor softmax(const MNTensor& input, int64_t dim) {
                 kernel_name = "softmax_simd_cooperative_fp32";
             } else if (input.dtype() == MNDType::Float16) {
                 kernel_name = "softmax_simd_cooperative_fp16";
+            } else if (input.dtype() == MNDType::BFloat16) {
+                // BFloat16: fallback to online kernel (no SIMD-cooperative variants)
+                kernel_name = "softmax_online_bf16";
             } else {
                 MN_THROW(MetalNativeError::InvalidArgument,
-                         "softmax: unsupported dtype (only Float32 and Float16)");
+                         "softmax: unsupported dtype (only Float32, Float16, and BFloat16)");
             }
         } else {
             // Fallback to existing online kernel for small reduce sizes
@@ -124,9 +136,11 @@ MNTensor softmax(const MNTensor& input, int64_t dim) {
                 kernel_name = "softmax_online_fp32";
             } else if (input.dtype() == MNDType::Float16) {
                 kernel_name = "softmax_online_fp16";
+            } else if (input.dtype() == MNDType::BFloat16) {
+                kernel_name = "softmax_online_bf16";
             } else {
                 MN_THROW(MetalNativeError::InvalidArgument,
-                         "softmax: unsupported dtype (only Float32 and Float16)");
+                         "softmax: unsupported dtype (only Float32, Float16, and BFloat16)");
             }
         }
 

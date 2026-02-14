@@ -64,9 +64,12 @@ MNTensor layer_norm(const MNTensor& input,
             else if (use_large) kernel_name = "layer_norm_large_fp16";
             else if (use_vectorized) kernel_name = "layer_norm_vec_fp16";
             else kernel_name = "layer_norm_kernel_fp16";
+        } else if (input.dtype() == MNDType::BFloat16) {
+            // BFloat16: only basic kernel variant (no vectorized/large variants)
+            kernel_name = "layer_norm_kernel_bf16";
         } else {
             MN_THROW(MetalNativeError::InvalidArgument,
-                     "layer_norm: unsupported dtype (only Float32 and Float16)");
+                     "layer_norm: unsupported dtype (only Float32, Float16, and BFloat16)");
         }
 
         id<MTLComputePipelineState> pipeline = KernelRegistry::instance().get_pipeline(kernel_name);
@@ -156,9 +159,12 @@ MNTensor rms_norm(const MNTensor& input,
             else if (use_large) kernel_name = "rms_norm_large_fp16";
             else if (use_vectorized) kernel_name = "rms_norm_vec_fp16";
             else kernel_name = "rms_norm_kernel_fp16";
+        } else if (input.dtype() == MNDType::BFloat16) {
+            // BFloat16: only basic kernel variant (no vectorized/large variants)
+            kernel_name = "rms_norm_kernel_bf16";
         } else {
             MN_THROW(MetalNativeError::InvalidArgument,
-                     "rms_norm: unsupported dtype (only Float32 and Float16)");
+                     "rms_norm: unsupported dtype (only Float32, Float16, and BFloat16)");
         }
 
         id<MTLComputePipelineState> pipeline = KernelRegistry::instance().get_pipeline(kernel_name);

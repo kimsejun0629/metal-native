@@ -44,6 +44,8 @@ MNTensor dispatch_binary_op(const MNTensor& a,
             kernel_name = std::string(kernel_prefix) + "_fp32";
         } else if (a.dtype() == MNDType::Float16) {
             kernel_name = std::string(kernel_prefix) + "_fp16";
+        } else if (a.dtype() == MNDType::BFloat16) {
+            kernel_name = std::string(kernel_prefix) + "_bf16";
         } else {
             MN_THROW(MetalNativeError::InvalidArgument,
                      "elementwise: unsupported dtype");
@@ -100,6 +102,8 @@ MNTensor dispatch_unary_op(const MNTensor& x,
             kernel_name = std::string(kernel_prefix) + "_fp32";
         } else if (x.dtype() == MNDType::Float16) {
             kernel_name = std::string(kernel_prefix) + "_fp16";
+        } else if (x.dtype() == MNDType::BFloat16) {
+            kernel_name = std::string(kernel_prefix) + "_bf16";
         } else {
             MN_THROW(MetalNativeError::InvalidArgument,
                      "elementwise: unsupported dtype");
@@ -185,6 +189,8 @@ MNTensor sqrt(const MNTensor& x, MNDevice& device) {
             kernel_name = "sqrt_fp32";
         } else if (x.dtype() == MNDType::Float16) {
             kernel_name = "sqrt_fp16";
+        } else if (x.dtype() == MNDType::BFloat16) {
+            kernel_name = "sqrt_bf16";
         } else {
             MN_THROW(MetalNativeError::InvalidArgument,
                      "sqrt: unsupported dtype");
@@ -248,6 +254,8 @@ MNTensor clamp(const MNTensor& x, float min_val, float max_val, MNDevice& device
             kernel_name = "clamp_fp32";
         } else if (x.dtype() == MNDType::Float16) {
             kernel_name = "clamp_fp16";
+        } else if (x.dtype() == MNDType::BFloat16) {
+            kernel_name = "clamp_bf16";
         } else {
             MN_THROW(MetalNativeError::InvalidArgument,
                      "clamp: unsupported dtype");
@@ -317,6 +325,8 @@ MNTensor where(const MNTensor& condition,
             kernel_name = "where_fp32";
         } else if (x.dtype() == MNDType::Float16) {
             kernel_name = "where_fp16";
+        } else if (x.dtype() == MNDType::BFloat16) {
+            kernel_name = "where_bf16";
         } else {
             MN_THROW(MetalNativeError::InvalidArgument,
                      "where: unsupported dtype");

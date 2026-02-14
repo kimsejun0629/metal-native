@@ -1004,3 +1004,44 @@ kernel void softmax_large_vec4_fp16(
         out4[i] = half4(result);
     }
 }
+
+// ============================================================================
+// BFloat16 Softmax Kernels
+// ============================================================================
+// BFloat16 is stored as ushort in Metal buffers. All computation happens in
+// FP32 with conversion at memory boundaries.
+
+kernel void softmax_online_bf16(
+    device const ushort* input    [[buffer(0)]],
+    device ushort* output         [[buffer(1)]],
+    constant uint& outer_size     [[buffer(2)]],
+    constant uint& reduce_size    [[buffer(3)]],
+    constant uint& inner_size     [[buffer(4)]],
+    uint2 gid                     [[thread_position_in_grid]]
+) {
+    const uint inner_idx = gid.x;
+    const uint outer_idx = gid.y;
+    if (inner_idx >= inner_size || outer_idx >= outer_size) return;
+
+    const uint base = outer_idx * reduce_size * inner_size + inner_idx;
+    const uint stride = inner_size;
+
+    // Pass 1: find max (FP32 accumulation)
+    float max_val = -INFINITY;
+    for (uint i = 0; i < reduce_size; i++) {
+        max_val = max(max_val, bf16_to_float(input[base + i * stride]));
+    }
+
+    // Pass 2: compute exp and sum (FP32 accumulation)
+    float sum_exp = 0.0f;
+    for (uint i = 0; i < reduce_size; i++) {
+        sum_exp += exp(bf16_to_float(input[base + i * stride]) - max_val);
+    }
+
+    // Pass 3: normalize and write output
+    float inv_sum = 1.0f / sum_exp;
+    for (uint i = 0; i < reduce_size; i++) {
+        float result = exp(bf16_to_float(input[base + i * stride]) - max_val) * inv_sum;
+        output[base + i * stride] = float_to_bf16(result);
+    }
+}

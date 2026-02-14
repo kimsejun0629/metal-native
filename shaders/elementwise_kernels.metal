@@ -654,3 +654,246 @@ kernel void where_fp16(device const bool* condition [[buffer(0)]],
                        uint id [[thread_position_in_grid]]) {
     output[id] = condition[id] ? x[id] : y[id];
 }
+
+// ---------------------------------------------------------------------------
+// BFloat16 element-wise kernels
+// ---------------------------------------------------------------------------
+// BFloat16 is stored as ushort in Metal buffers. Convert to float for
+// computation, then convert back to ushort. All math done in FP32.
+
+kernel void add_bf16(device const ushort* a      [[buffer(0)]],
+                     device const ushort* b      [[buffer(1)]],
+                     device ushort*       output [[buffer(2)]],
+                     constant uint&       num_elements [[buffer(3)]],
+                     uint id [[thread_position_in_grid]]) {
+    const uint idx = id * 4;
+    if (idx + 3 < num_elements) {
+        ushort4 va = ushort4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
+        ushort4 vb = ushort4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        float4 fa = bf16x4_to_float4(va);
+        float4 fb = bf16x4_to_float4(vb);
+        float4 fr = fa + fb;
+        ushort4 vr = float4_to_bf16x4(fr);
+        output[idx]   = vr.x;
+        output[idx+1] = vr.y;
+        output[idx+2] = vr.z;
+        output[idx+3] = vr.w;
+    } else {
+        for (uint i = idx; i < min(idx + 4, num_elements); i++) {
+            float result = bf16_to_float(a[i]) + bf16_to_float(b[i]);
+            output[i] = float_to_bf16(result);
+        }
+    }
+}
+
+kernel void sub_bf16(device const ushort* a      [[buffer(0)]],
+                     device const ushort* b      [[buffer(1)]],
+                     device ushort*       output [[buffer(2)]],
+                     constant uint&       num_elements [[buffer(3)]],
+                     uint id [[thread_position_in_grid]]) {
+    const uint idx = id * 4;
+    if (idx + 3 < num_elements) {
+        ushort4 va = ushort4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
+        ushort4 vb = ushort4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        float4 fa = bf16x4_to_float4(va);
+        float4 fb = bf16x4_to_float4(vb);
+        float4 fr = fa - fb;
+        ushort4 vr = float4_to_bf16x4(fr);
+        output[idx]   = vr.x;
+        output[idx+1] = vr.y;
+        output[idx+2] = vr.z;
+        output[idx+3] = vr.w;
+    } else {
+        for (uint i = idx; i < min(idx + 4, num_elements); i++) {
+            float result = bf16_to_float(a[i]) - bf16_to_float(b[i]);
+            output[i] = float_to_bf16(result);
+        }
+    }
+}
+
+kernel void mul_bf16(device const ushort* a      [[buffer(0)]],
+                     device const ushort* b      [[buffer(1)]],
+                     device ushort*       output [[buffer(2)]],
+                     constant uint&       num_elements [[buffer(3)]],
+                     uint id [[thread_position_in_grid]]) {
+    const uint idx = id * 4;
+    if (idx + 3 < num_elements) {
+        ushort4 va = ushort4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
+        ushort4 vb = ushort4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        float4 fa = bf16x4_to_float4(va);
+        float4 fb = bf16x4_to_float4(vb);
+        float4 fr = fa * fb;
+        ushort4 vr = float4_to_bf16x4(fr);
+        output[idx]   = vr.x;
+        output[idx+1] = vr.y;
+        output[idx+2] = vr.z;
+        output[idx+3] = vr.w;
+    } else {
+        for (uint i = idx; i < min(idx + 4, num_elements); i++) {
+            float result = bf16_to_float(a[i]) * bf16_to_float(b[i]);
+            output[i] = float_to_bf16(result);
+        }
+    }
+}
+
+kernel void div_bf16(device const ushort* a      [[buffer(0)]],
+                     device const ushort* b      [[buffer(1)]],
+                     device ushort*       output [[buffer(2)]],
+                     constant uint&       num_elements [[buffer(3)]],
+                     uint id [[thread_position_in_grid]]) {
+    const uint idx = id * 4;
+    if (idx + 3 < num_elements) {
+        ushort4 va = ushort4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
+        ushort4 vb = ushort4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        float4 fa = bf16x4_to_float4(va);
+        float4 fb = bf16x4_to_float4(vb);
+        float4 fr = fa / fb;
+        ushort4 vr = float4_to_bf16x4(fr);
+        output[idx]   = vr.x;
+        output[idx+1] = vr.y;
+        output[idx+2] = vr.z;
+        output[idx+3] = vr.w;
+    } else {
+        for (uint i = idx; i < min(idx + 4, num_elements); i++) {
+            float result = bf16_to_float(a[i]) / bf16_to_float(b[i]);
+            output[i] = float_to_bf16(result);
+        }
+    }
+}
+
+kernel void exp_bf16(device const ushort* input  [[buffer(0)]],
+                     device ushort*       output [[buffer(1)]],
+                     constant uint&       num_elements [[buffer(2)]],
+                     uint id [[thread_position_in_grid]]) {
+    const uint idx = id * 4;
+    if (idx + 3 < num_elements) {
+        ushort4 vi = ushort4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 fi = bf16x4_to_float4(vi);
+        float4 fr = exp(fi);
+        ushort4 vr = float4_to_bf16x4(fr);
+        output[idx]   = vr.x;
+        output[idx+1] = vr.y;
+        output[idx+2] = vr.z;
+        output[idx+3] = vr.w;
+    } else {
+        for (uint i = idx; i < min(idx + 4, num_elements); i++) {
+            output[i] = float_to_bf16(exp(bf16_to_float(input[i])));
+        }
+    }
+}
+
+kernel void log_bf16(device const ushort* input  [[buffer(0)]],
+                     device ushort*       output [[buffer(1)]],
+                     constant uint&       num_elements [[buffer(2)]],
+                     uint id [[thread_position_in_grid]]) {
+    const uint idx = id * 4;
+    if (idx + 3 < num_elements) {
+        ushort4 vi = ushort4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 fi = bf16x4_to_float4(vi);
+        float4 fr = log(fi);
+        ushort4 vr = float4_to_bf16x4(fr);
+        output[idx]   = vr.x;
+        output[idx+1] = vr.y;
+        output[idx+2] = vr.z;
+        output[idx+3] = vr.w;
+    } else {
+        for (uint i = idx; i < min(idx + 4, num_elements); i++) {
+            output[i] = float_to_bf16(log(bf16_to_float(input[i])));
+        }
+    }
+}
+
+kernel void neg_bf16(device const ushort* input  [[buffer(0)]],
+                     device ushort*       output [[buffer(1)]],
+                     constant uint&       num_elements [[buffer(2)]],
+                     uint id [[thread_position_in_grid]]) {
+    const uint idx = id * 4;
+    if (idx + 3 < num_elements) {
+        ushort4 vi = ushort4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 fi = bf16x4_to_float4(vi);
+        float4 fr = -fi;
+        ushort4 vr = float4_to_bf16x4(fr);
+        output[idx]   = vr.x;
+        output[idx+1] = vr.y;
+        output[idx+2] = vr.z;
+        output[idx+3] = vr.w;
+    } else {
+        for (uint i = idx; i < min(idx + 4, num_elements); i++) {
+            output[i] = float_to_bf16(-bf16_to_float(input[i]));
+        }
+    }
+}
+
+kernel void abs_bf16(device const ushort* input  [[buffer(0)]],
+                     device ushort*       output [[buffer(1)]],
+                     constant uint&       num_elements [[buffer(2)]],
+                     uint id [[thread_position_in_grid]]) {
+    const uint idx = id * 4;
+    if (idx + 3 < num_elements) {
+        ushort4 vi = ushort4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 fi = bf16x4_to_float4(vi);
+        float4 fr = abs(fi);
+        ushort4 vr = float4_to_bf16x4(fr);
+        output[idx]   = vr.x;
+        output[idx+1] = vr.y;
+        output[idx+2] = vr.z;
+        output[idx+3] = vr.w;
+    } else {
+        for (uint i = idx; i < min(idx + 4, num_elements); i++) {
+            output[i] = float_to_bf16(abs(bf16_to_float(input[i])));
+        }
+    }
+}
+
+kernel void sqrt_bf16(device const ushort* input  [[buffer(0)]],
+                      device ushort*       output [[buffer(1)]],
+                      constant uint&       num_elements [[buffer(2)]],
+                      uint id [[thread_position_in_grid]]) {
+    const uint idx = id * 4;
+    if (idx + 3 < num_elements) {
+        ushort4 vi = ushort4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 fi = bf16x4_to_float4(vi);
+        float4 fr = sqrt(fi);
+        ushort4 vr = float4_to_bf16x4(fr);
+        output[idx]   = vr.x;
+        output[idx+1] = vr.y;
+        output[idx+2] = vr.z;
+        output[idx+3] = vr.w;
+    } else {
+        for (uint i = idx; i < min(idx + 4, num_elements); i++) {
+            output[i] = float_to_bf16(sqrt(bf16_to_float(input[i])));
+        }
+    }
+}
+
+kernel void clamp_bf16(device const ushort* input   [[buffer(0)]],
+                       device ushort*       output  [[buffer(1)]],
+                       constant float*      bounds  [[buffer(2)]],  // [min, max]
+                       constant uint&       num_elements [[buffer(3)]],
+                       uint id [[thread_position_in_grid]]) {
+    const uint idx = id * 4;
+    const float min_val = bounds[0];
+    const float max_val = bounds[1];
+    if (idx + 3 < num_elements) {
+        ushort4 vi = ushort4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 fi = bf16x4_to_float4(vi);
+        float4 fr = clamp(fi, min_val, max_val);
+        ushort4 vr = float4_to_bf16x4(fr);
+        output[idx]   = vr.x;
+        output[idx+1] = vr.y;
+        output[idx+2] = vr.z;
+        output[idx+3] = vr.w;
+    } else {
+        for (uint i = idx; i < min(idx + 4, num_elements); i++) {
+            output[i] = float_to_bf16(clamp(bf16_to_float(input[i]), min_val, max_val));
+        }
+    }
+}
+
+kernel void where_bf16(device const bool*   condition [[buffer(0)]],
+                       device const ushort* x         [[buffer(1)]],
+                       device const ushort* y         [[buffer(2)]],
+                       device ushort*       output    [[buffer(3)]],
+                       uint id [[thread_position_in_grid]]) {
+    output[id] = condition[id] ? x[id] : y[id];
+}
