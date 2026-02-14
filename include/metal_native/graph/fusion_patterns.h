@@ -38,9 +38,17 @@ enum class OpType : uint8_t {
     Mul,
     SiLU,
     RMSNorm,
+    FusedResidualRMSNorm,
     RoPE,
     SwiGLU,
     Residual,
+    Sub,
+    Div,
+    Exp,
+    Log,
+    Neg,
+    Abs,
+    Sqrt,
 };
 
 /// Convert OpType to human-readable string.

@@ -31,9 +31,17 @@ const char* op_type_name(OpType type) noexcept {
         case OpType::Mul:       return "Mul";
         case OpType::SiLU:      return "SiLU";
         case OpType::RMSNorm:   return "RMSNorm";
+        case OpType::FusedResidualRMSNorm: return "FusedResidualRMSNorm";
         case OpType::RoPE:      return "RoPE";
         case OpType::SwiGLU:    return "SwiGLU";
         case OpType::Residual:  return "Residual";
+        case OpType::Sub:       return "Sub";
+        case OpType::Div:       return "Div";
+        case OpType::Exp:       return "Exp";
+        case OpType::Log:       return "Log";
+        case OpType::Neg:       return "Neg";
+        case OpType::Abs:       return "Abs";
+        case OpType::Sqrt:      return "Sqrt";
     }
     return "Unknown";
 }

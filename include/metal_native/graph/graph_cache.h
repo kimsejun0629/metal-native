@@ -162,6 +162,18 @@ public:
     /// Estimate the memory footprint of all cached entries (bytes).
     size_t memory_footprint() const;
 
+    // -- Shape bucketing -----------------------------------------------------
+
+    /// Enable or disable shape bucketing for cache key normalization.
+    /// When enabled, shape tuples are rounded up to predefined bucket sizes
+    /// before lookup/insertion, reducing cache misses for similar shapes.
+    /// @param enabled  True to enable bucketing, false to disable.
+    void set_bucketing_enabled(bool enabled);
+
+    /// Check whether shape bucketing is currently enabled.
+    /// @return  True if bucketing is enabled, false otherwise.
+    bool bucketing_enabled() const noexcept;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

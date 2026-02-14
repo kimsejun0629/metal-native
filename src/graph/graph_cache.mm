@@ -6,6 +6,7 @@
 
 #include "metal_native/graph/graph_cache.h"
 #include "metal_native/graph/graph_serializer.h"
+#include "metal_native/graph/shape_bucketing.h"
 #include "metal_native/core/error.h"
 
 #include <chrono>
@@ -109,6 +110,10 @@ struct GraphCache::Impl {
     dispatch_source_t eviction_timer = nil;
     dispatch_queue_t timer_queue = nil;
 
+    // Shape bucketing
+    ShapeBucketer bucketer_;
+    bool bucketing_enabled_ = false;
+
     Impl() {
         // Set up cache directory: ~/.cache/metal_native/graph_cache/
         @autoreleasepool {
@@ -150,6 +155,35 @@ struct GraphCache::Impl {
         snprintf(hex, sizeof(hex), "%016zx", full_hash);
         return cache_dir + "/" + hex + ".mpsgraphpackage";
     }
+
+    // Apply shape bucketing to a key (returns a copy with bucketed shapes)
+    GraphCacheKey apply_bucketing(const GraphCacheKey& key) const {
+        if (!bucketing_enabled_) {
+            return key;
+        }
+
+        GraphCacheKey bucketed_key = key;
+
+        // Convert shape_tuple to MNShape
+        std::vector<int64_t> shape_dims;
+        shape_dims.reserve(key.shape_tuple.size());
+        for (size_t dim : key.shape_tuple) {
+            shape_dims.push_back(static_cast<int64_t>(dim));
+        }
+        MNShape original(shape_dims);
+
+        // Bucket the shape
+        MNShape bucketed = bucketer_.bucket_shape(original);
+
+        // Convert back to shape_tuple
+        bucketed_key.shape_tuple.clear();
+        bucketed_key.shape_tuple.reserve(bucketed.ndim());
+        for (size_t i = 0; i < bucketed.ndim(); ++i) {
+            bucketed_key.shape_tuple.push_back(static_cast<size_t>(bucketed[static_cast<int64_t>(i)]));
+        }
+
+        return bucketed_key;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -170,8 +204,11 @@ GraphCache::~GraphCache() = default;
 MPSGraphExecutable* GraphCache::lookup(const GraphCacheKey& key) {
     std::lock_guard<std::mutex> lock(impl_->mu);
 
+    // Apply bucketing if enabled
+    GraphCacheKey effective_key = impl_->apply_bucketing(key);
+
     // Check L1 cache first
-    auto it = impl_->map.find(key);
+    auto it = impl_->map.find(effective_key);
     if (it != impl_->map.end()) {
         // L1 hit: move to front and update access time
         auto& entry = *it->second;
@@ -184,7 +221,7 @@ MPSGraphExecutable* GraphCache::lookup(const GraphCacheKey& key) {
     ++impl_->l1_misses;
 
     // Check L2 (disk) cache
-    std::string path = impl_->disk_path(key);
+    std::string path = impl_->disk_path(effective_key);
 
     @autoreleasepool {
         NSString* ns_path = [NSString stringWithUTF8String:path.c_str()];
@@ -210,8 +247,8 @@ MPSGraphExecutable* GraphCache::lookup(const GraphCacheKey& key) {
                     impl_->order.pop_back();
                 }
 
-                impl_->order.emplace_front(key, executable);
-                impl_->map[key] = impl_->order.begin();
+                impl_->order.emplace_front(effective_key, executable);
+                impl_->map[effective_key] = impl_->order.begin();
 
                 return executable;
             }
@@ -233,8 +270,11 @@ void GraphCache::insert(const GraphCacheKey& key, MPSGraphExecutable* executable
 
     std::lock_guard<std::mutex> lock(impl_->mu);
 
+    // Apply bucketing if enabled
+    GraphCacheKey effective_key = impl_->apply_bucketing(key);
+
     // Check if already in L1
-    auto it = impl_->map.find(key);
+    auto it = impl_->map.find(effective_key);
     if (it != impl_->map.end()) {
         // Update existing entry and promote to front
         auto& entry = *it->second;
@@ -252,11 +292,11 @@ void GraphCache::insert(const GraphCacheKey& key, MPSGraphExecutable* executable
     }
 
     // Insert new entry at front
-    impl_->order.emplace_front(key, executable);
-    impl_->map[key] = impl_->order.begin();
+    impl_->order.emplace_front(effective_key, executable);
+    impl_->map[effective_key] = impl_->order.begin();
 
     // Asynchronously serialize to L2
-    std::string path = impl_->disk_path(key);
+    std::string path = impl_->disk_path(effective_key);
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
         @autoreleasepool {
             try {
@@ -407,6 +447,20 @@ size_t GraphCache::memory_footprint() const {
     constexpr size_t kAvgExecutableSize = 32 * 1024;
     constexpr size_t kEntryOverhead = sizeof(GraphCacheKey) + 64; // pointers, timestamps
     return impl_->map.size() * (kAvgExecutableSize + kEntryOverhead);
+}
+
+// ---------------------------------------------------------------------------
+// Shape bucketing
+// ---------------------------------------------------------------------------
+
+void GraphCache::set_bucketing_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    impl_->bucketing_enabled_ = enabled;
+}
+
+bool GraphCache::bucketing_enabled() const noexcept {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    return impl_->bucketing_enabled_;
 }
 
 } // namespace metal_native

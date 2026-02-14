@@ -57,6 +57,9 @@ struct LazyNode {
 
     /// Reference count (how many downstream nodes depend on this).
     uint32_t ref_count = 0;
+
+    /// Whether this node is marked as an output (protected from DCE).
+    bool is_output = false;
 };
 
 /// Lazy evaluation graph that records and optimizes computations.
@@ -89,6 +92,12 @@ public:
 
     /// Check if a node has been materialized.
     bool is_materialized(LazyNodeId node_id) const;
+
+    /// Mark a node as an output (protects it from dead code elimination).
+    void mark_output(LazyNodeId node_id);
+
+    /// Unmark a node as output.
+    void unmark_output(LazyNodeId node_id);
 
     // -- Optimization passes -------------------------------------------------
 

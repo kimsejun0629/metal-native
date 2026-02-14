@@ -117,10 +117,77 @@ struct LazyGraph::Impl {
                 }
                 break;
             }
+            case OpType::FusedResidualRMSNorm: {
+                // inputs: [input, residual, weight]
+                if (inputs.size() == 3) {
+                    float eps = (node.scalar_params.size() > 0) ?
+                        static_cast<float>(node.scalar_params[0]) : 1e-6f;
+                    auto result = std::make_shared<MNTensor>(
+                        fast::fused_residual_norm(*inputs[0], *inputs[1], *inputs[2], eps));
+                    return result;
+                }
+                break;
+            }
             case OpType::MatMul: {
                 if (inputs.size() == 2) {
                     auto result = std::make_shared<MNTensor>(
                         matmul(*inputs[0], *inputs[1]));
+                    return result;
+                }
+                break;
+            }
+            case OpType::Sub: {
+                if (inputs.size() == 2) {
+                    auto result = std::make_shared<MNTensor>(
+                        sub(*inputs[0], *inputs[1], device));
+                    return result;
+                }
+                break;
+            }
+            case OpType::Div: {
+                if (inputs.size() == 2) {
+                    auto result = std::make_shared<MNTensor>(
+                        div(*inputs[0], *inputs[1], device));
+                    return result;
+                }
+                break;
+            }
+            case OpType::Exp: {
+                if (inputs.size() == 1) {
+                    auto result = std::make_shared<MNTensor>(
+                        exp(*inputs[0], device));
+                    return result;
+                }
+                break;
+            }
+            case OpType::Log: {
+                if (inputs.size() == 1) {
+                    auto result = std::make_shared<MNTensor>(
+                        log(*inputs[0], device));
+                    return result;
+                }
+                break;
+            }
+            case OpType::Neg: {
+                if (inputs.size() == 1) {
+                    auto result = std::make_shared<MNTensor>(
+                        neg(*inputs[0], device));
+                    return result;
+                }
+                break;
+            }
+            case OpType::Abs: {
+                if (inputs.size() == 1) {
+                    auto result = std::make_shared<MNTensor>(
+                        abs(*inputs[0], device));
+                    return result;
+                }
+                break;
+            }
+            case OpType::Sqrt: {
+                if (inputs.size() == 1) {
+                    auto result = std::make_shared<MNTensor>(
+                        sqrt(*inputs[0], device));
                     return result;
                 }
                 break;
@@ -332,54 +399,181 @@ bool LazyGraph::is_materialized(LazyNodeId node_id) const {
     return it->second.status == LazyNodeStatus::Materialized;
 }
 
+void LazyGraph::mark_output(LazyNodeId node_id) {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    auto it = impl_->nodes.find(node_id);
+    MN_CHECK(it != impl_->nodes.end(),
+             MetalNativeError::InvalidArgument,
+             "LazyGraph::mark_output: node not found");
+    it->second.is_output = true;
+}
+
+void LazyGraph::unmark_output(LazyNodeId node_id) {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    auto it = impl_->nodes.find(node_id);
+    if (it != impl_->nodes.end()) {
+        it->second.is_output = false;
+    }
+}
+
 size_t LazyGraph::optimize_fusions() {
     std::lock_guard<std::mutex> lock(impl_->mu);
 
-    // Collect pending ops in topological order
-    std::vector<OpType> op_sequence;
-    std::vector<LazyNodeId> node_order;
-
+    // Collect pending ops sorted by node ID for deterministic order
+    std::vector<std::pair<LazyNodeId, OpType>> pending_ops;
     for (const auto& [id, node] : impl_->nodes) {
         if (node.status == LazyNodeStatus::Pending) {
-            op_sequence.push_back(node.op_type);
-            node_order.push_back(id);
+            pending_ops.push_back({id, node.op_type});
         }
     }
 
-    if (op_sequence.empty()) return 0;
+    if (pending_ops.empty()) return 0;
+
+    std::sort(pending_ops.begin(), pending_ops.end());
+
+    std::vector<OpType> op_sequence;
+    std::vector<LazyNodeId> node_order;
+    for (const auto& [id, op] : pending_ops) {
+        op_sequence.push_back(op);
+        node_order.push_back(id);
+    }
 
     auto& registry = FusionRegistry::instance();
     auto matches = registry.find_all_fusions(op_sequence);
 
-    // TODO: Rewrite fused sequences into single nodes
-    return matches.size();
+    // Rewrite fused sequences into single nodes
+    size_t fusions_applied = 0;
+    for (const auto& match : matches) {
+        if (!match.matched || match.length < 2) continue;
+
+        // Get the nodes in this match
+        size_t start = match.start_index;
+        std::vector<LazyNodeId> match_ids;
+        for (size_t j = 0; j < match.length; ++j) {
+            match_ids.push_back(node_order[start + j]);
+        }
+
+        const std::string& fused_name = match.pattern->fused_name;
+
+        if (fused_name == "FusedResidualRMSNorm" && match_ids.size() == 2) {
+            // match_ids[0] = Add node, match_ids[1] = RMSNorm node
+            auto& add_node = impl_->nodes[match_ids[0]];
+            auto& rms_node = impl_->nodes[match_ids[1]];
+
+            // Create fused node
+            LazyNode fused;
+            fused.id = impl_->allocate_id();
+            fused.op_type = OpType::FusedResidualRMSNorm;
+            fused.output_shape = rms_node.output_shape;
+            fused.output_dtype = rms_node.output_dtype;
+            // Inputs: add's 2 inputs + rms_norm's weight input
+            fused.inputs = add_node.inputs; // [input, residual]
+            // RMSNorm's inputs are [add_output, weight] — we want the weight
+            if (rms_node.inputs.size() >= 2) {
+                fused.inputs.push_back(rms_node.inputs[1]); // weight
+            }
+            fused.scalar_params = rms_node.scalar_params;
+            fused.ref_count = rms_node.ref_count;
+
+            // Remap any nodes that depended on rms_node to point to fused node
+            LazyNodeId fused_id = fused.id;
+            LazyNodeId old_output_id = match_ids.back();
+            for (auto& [nid, n] : impl_->nodes) {
+                for (auto& inp : n.inputs) {
+                    if (inp == old_output_id) {
+                        inp = fused_id;
+                    }
+                }
+            }
+
+            // Remove old nodes
+            impl_->nodes.erase(match_ids[0]);
+            impl_->nodes.erase(match_ids[1]);
+
+            // Insert fused node
+            impl_->nodes[fused_id] = std::move(fused);
+            ++fusions_applied;
+        }
+        else if (fused_name == "FusedSwiGLU" && match_ids.size() == 2) {
+            // match_ids[0] = SiLU node, match_ids[1] = Mul node
+            auto& silu_node = impl_->nodes[match_ids[0]];
+            auto& mul_node = impl_->nodes[match_ids[1]];
+
+            LazyNode fused;
+            fused.id = impl_->allocate_id();
+            fused.op_type = OpType::SwiGLU;
+            fused.output_shape = mul_node.output_shape;
+            fused.output_dtype = mul_node.output_dtype;
+            // SiLU input is gate, Mul's other input is up
+            fused.inputs.push_back(silu_node.inputs[0]); // gate
+            // Mul inputs: [silu_output, up] - find the non-silu input
+            for (LazyNodeId inp : mul_node.inputs) {
+                if (inp != match_ids[0]) {
+                    fused.inputs.push_back(inp); // up
+                }
+            }
+            fused.ref_count = mul_node.ref_count;
+
+            LazyNodeId fused_id = fused.id;
+            LazyNodeId old_output_id = match_ids.back();
+            for (auto& [nid, n] : impl_->nodes) {
+                for (auto& inp : n.inputs) {
+                    if (inp == old_output_id) {
+                        inp = fused_id;
+                    }
+                }
+            }
+
+            impl_->nodes.erase(match_ids[0]);
+            impl_->nodes.erase(match_ids[1]);
+            impl_->nodes[fused_id] = std::move(fused);
+            ++fusions_applied;
+        }
+        // Other patterns: skip for now (they need more complex rewriting)
+    }
+
+    return fusions_applied;
 }
 
 size_t LazyGraph::eliminate_dead_code() {
     std::lock_guard<std::mutex> lock(impl_->mu);
 
     size_t eliminated = 0;
-    std::vector<LazyNodeId> to_remove;
+    bool changed = true;
 
-    for (const auto& [id, node] : impl_->nodes) {
-        if (node.status == LazyNodeStatus::Pending && node.ref_count == 0) {
-            // Check if this is truly dead (not an output)
-            // For now, skip - need output marking to determine this
-        }
-    }
+    // Iteratively remove dead nodes until no more can be removed
+    while (changed) {
+        changed = false;
+        std::vector<LazyNodeId> to_remove;
 
-    for (LazyNodeId id : to_remove) {
-        // Decrement ref counts of inputs before removing
-        auto it = impl_->nodes.find(id);
-        if (it != impl_->nodes.end()) {
-            for (LazyNodeId inp : it->second.inputs) {
-                auto inp_it = impl_->nodes.find(inp);
-                if (inp_it != impl_->nodes.end() && inp_it->second.ref_count > 0) {
-                    inp_it->second.ref_count--;
-                }
+        for (const auto& [id, node] : impl_->nodes) {
+            // A node is dead if:
+            // 1. It's pending (not yet materialized)
+            // 2. It has zero downstream references
+            // 3. It's NOT marked as output
+            // 4. It's NOT an input node (op_type != Unknown with result)
+            if (node.status == LazyNodeStatus::Pending &&
+                node.ref_count == 0 &&
+                !node.is_output &&
+                node.op_type != OpType::Unknown) {
+                to_remove.push_back(id);
             }
-            impl_->nodes.erase(it);
-            eliminated++;
+        }
+
+        for (LazyNodeId id : to_remove) {
+            auto it = impl_->nodes.find(id);
+            if (it != impl_->nodes.end()) {
+                // Decrement ref counts of inputs before removing
+                for (LazyNodeId inp : it->second.inputs) {
+                    auto inp_it = impl_->nodes.find(inp);
+                    if (inp_it != impl_->nodes.end() && inp_it->second.ref_count > 0) {
+                        inp_it->second.ref_count--;
+                    }
+                }
+                impl_->nodes.erase(it);
+                eliminated++;
+                changed = true;
+            }
         }
     }
 
