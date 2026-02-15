@@ -191,3 +191,140 @@ kernel void fused_residual_rms_norm_large_fp16(
         output[base + i] = half(val * rms_inv * float(weight[i]));
     }
 }
+
+// ============================================================================
+// REGISTER-CACHED FUSED RESIDUAL NORM KERNELS
+// ============================================================================
+// 256 threads per threadgroup, cache values in registers to avoid device memory
+// read in pass 2. Suitable for norm_size <= 8192 (32 elements * 256 threads).
+// ============================================================================
+
+constant constexpr uint RESID_REGCACHE_THREADS = 256;
+constant constexpr uint RESID_REGCACHE_SIMD_GROUPS = RESID_REGCACHE_THREADS / 32;  // 8
+constant constexpr uint RESID_MAX_ELEMENTS_PER_THREAD = 32;
+
+kernel void fused_residual_rms_norm_regcache_fp32(
+    device const float* input      [[buffer(0)]],
+    device const float* residual   [[buffer(1)]],
+    device const float* weight     [[buffer(2)]],
+    device float*       output     [[buffer(3)]],
+    constant uint&      batch_size [[buffer(4)]],
+    constant uint&      norm_size  [[buffer(5)]],
+    constant float&     eps        [[buffer(6)]],
+    threadgroup float*  shared     [[threadgroup(0)]],  // 8 floats
+    uint  tg_idx        [[threadgroup_position_in_grid]],
+    uint  tid_in_tg     [[thread_index_in_threadgroup]],
+    uint  simd_group_id [[simdgroup_index_in_threadgroup]],
+    uint  simd_lane_id  [[thread_index_in_simdgroup]])
+{
+    uint row = tg_idx;
+    if (row >= batch_size) return;
+
+    uint base = row * norm_size;
+
+    // Register cache for values
+    float cached[RESID_MAX_ELEMENTS_PER_THREAD];
+
+    // Pass 1: Read, cache in registers, compute sum of squares
+    float sum_sq = 0.0f;
+    uint num_cached = 0;
+    for (uint i = tid_in_tg; i < norm_size && num_cached < RESID_MAX_ELEMENTS_PER_THREAD; i += RESID_REGCACHE_THREADS) {
+        float val = input[base + i] + residual[base + i];
+        cached[num_cached] = val;
+        sum_sq += val * val;
+        num_cached++;
+    }
+
+    // Intra-SIMD reduction
+    sum_sq = simd_sum(sum_sq);
+
+    if (simd_lane_id == 0) {
+        shared[simd_group_id] = sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Inter-SIMD reduction
+    float total_sq = 0.0f;
+    if (simd_group_id == 0 && simd_lane_id < RESID_REGCACHE_SIMD_GROUPS) {
+        total_sq = shared[simd_lane_id];
+    }
+    if (simd_group_id == 0) {
+        total_sq = simd_sum(total_sq);
+        if (simd_lane_id == 0) {
+            shared[0] = total_sq;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float rms_inv = rsqrt(shared[0] / float(norm_size) + eps);
+
+    // Pass 2: Use cached values (NO device memory read!)
+    uint cache_idx = 0;
+    for (uint i = tid_in_tg; i < norm_size && cache_idx < num_cached; i += RESID_REGCACHE_THREADS) {
+        output[base + i] = cached[cache_idx] * rms_inv * weight[i];
+        cache_idx++;
+    }
+}
+
+kernel void fused_residual_rms_norm_regcache_fp16(
+    device const half*  input      [[buffer(0)]],
+    device const half*  residual   [[buffer(1)]],
+    device const half*  weight     [[buffer(2)]],
+    device half*        output     [[buffer(3)]],
+    constant uint&      batch_size [[buffer(4)]],
+    constant uint&      norm_size  [[buffer(5)]],
+    constant float&     eps        [[buffer(6)]],
+    threadgroup float*  shared     [[threadgroup(0)]],  // 8 floats
+    uint  tg_idx        [[threadgroup_position_in_grid]],
+    uint  tid_in_tg     [[thread_index_in_threadgroup]],
+    uint  simd_group_id [[simdgroup_index_in_threadgroup]],
+    uint  simd_lane_id  [[thread_index_in_simdgroup]])
+{
+    uint row = tg_idx;
+    if (row >= batch_size) return;
+
+    uint base = row * norm_size;
+
+    // Register cache for FP32 values
+    float cached[RESID_MAX_ELEMENTS_PER_THREAD];
+
+    // Pass 1: Read FP16, compute in FP32, cache in registers
+    float sum_sq = 0.0f;
+    uint num_cached = 0;
+    for (uint i = tid_in_tg; i < norm_size && num_cached < RESID_MAX_ELEMENTS_PER_THREAD; i += RESID_REGCACHE_THREADS) {
+        float val = float(input[base + i]) + float(residual[base + i]);
+        cached[num_cached] = val;
+        sum_sq += val * val;
+        num_cached++;
+    }
+
+    // Intra-SIMD reduction
+    sum_sq = simd_sum(sum_sq);
+
+    if (simd_lane_id == 0) {
+        shared[simd_group_id] = sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Inter-SIMD reduction
+    float total_sq = 0.0f;
+    if (simd_group_id == 0 && simd_lane_id < RESID_REGCACHE_SIMD_GROUPS) {
+        total_sq = shared[simd_lane_id];
+    }
+    if (simd_group_id == 0) {
+        total_sq = simd_sum(total_sq);
+        if (simd_lane_id == 0) {
+            shared[0] = total_sq;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float rms_inv = rsqrt(shared[0] / float(norm_size) + eps);
+
+    // Pass 2: Use cached FP32 values, write as FP16 (NO device memory read!)
+    uint cache_idx = 0;
+    for (uint i = tid_in_tg; i < norm_size && cache_idx < num_cached; i += RESID_REGCACHE_THREADS) {
+        output[base + i] = half(cached[cache_idx] * rms_inv * float(weight[i]));
+        cache_idx++;
+    }
+}

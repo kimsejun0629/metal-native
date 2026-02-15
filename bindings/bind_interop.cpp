@@ -21,6 +21,7 @@
 #include "metal_native/core/error.h"
 #include <string>
 #include <cstring>
+#include <dispatch/dispatch.h>
 
 namespace py = pybind11;
 
@@ -69,16 +70,47 @@ static MNTensor tensor_from_mps_ptr(
     // Convert dtype string to enum
     MNDType dtype = parse_dtype(dtype_str);
 
-    // Wrap external pointer as MNBuffer (zero-copy)
+    // Wrap external pointer as MNBuffer (zero-copy).
+    // MPS GPU pointers may not be page-aligned; wrap_external aligns
+    // DOWN and returns the alignment offset via out_offset.
+    size_t alignment_offset = 0;
     auto buffer = MNBuffer::wrap_external(
         MNDevice::instance(),
         reinterpret_cast<void*>(data_ptr),
-        nbytes
+        nbytes,
+        nullptr,           // no release callback
+        &alignment_offset   // receive page-alignment offset
     );
 
-    // Construct MNTensor from buffer + shape + strides + dtype
+    // Construct MNTensor from buffer + shape + strides + dtype.
+    // The alignment_offset ensures Metal encoders address the correct
+    // data start within the page-aligned buffer.
     MNShape mn_shape(std::move(shape));
-    return MNTensor(buffer, mn_shape, std::move(strides), dtype, 0);
+    return MNTensor(buffer, mn_shape, std::move(strides), dtype, alignment_offset);
+}
+
+/**
+ * @brief Parallel memcpy using GCD dispatch_apply for large transfers.
+ *
+ * Splits the copy into 4MB chunks and distributes across CPU cores
+ * via the global concurrent queue. Falls back to plain memcpy for
+ * transfers <= 4MB.
+ */
+static void parallel_memcpy(void* dst, const void* src, size_t nbytes) {
+    constexpr size_t kChunkSize = 4 * 1024 * 1024; // 4MB
+    if (nbytes <= kChunkSize) {
+        std::memcpy(dst, src, nbytes);
+        return;
+    }
+    size_t nchunks = (nbytes + kChunkSize - 1) / kChunkSize;
+    dispatch_apply(nchunks,
+        dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0),
+        ^(size_t i) {
+            size_t offset = i * kChunkSize;
+            size_t len = std::min(kChunkSize, nbytes - offset);
+            memcpy(static_cast<char*>(dst) + offset,
+                   static_cast<const char*>(src) + offset, len);
+        });
 }
 
 /**
@@ -103,13 +135,37 @@ static MNTensor tensor_from_cpu_data(
     MNDType dtype = parse_dtype(dtype_str);
     MNDevice& device = MNDevice::instance();
 
-    // Allocate Metal buffer and copy from CPU source
+    // Allocate Metal buffer and copy from CPU source (parallel for large buffers)
     auto buf = std::make_shared<MNBuffer>(device, nbytes, StorageMode::Shared);
-    std::memcpy(buf->data(), reinterpret_cast<void*>(data_ptr), nbytes);
+    parallel_memcpy(buf->data(), reinterpret_cast<void*>(data_ptr), nbytes);
 
     MNShape mn_shape(std::move(shape));
     auto strides = mn_shape.contiguous_strides();
     return MNTensor(buf, mn_shape, std::move(strides), dtype, 0);
+}
+
+/**
+ * @brief Allocate a Metal Shared buffer and return its CPU pointer + MNTensor.
+ *
+ * This enables the "direct buffer target" optimization: Python can create
+ * a torch CPU tensor view over the returned pointer, then copy MPS data
+ * directly into our Metal buffer via PyTorch's GPU blit — eliminating
+ * the second CPU→Metal memcpy that the tensor_from_cpu_data path requires.
+ *
+ * @param shape Tensor shape
+ * @param dtype_str Data type string
+ * @return Tuple of (cpu_data_ptr as uintptr_t, MNTensor)
+ */
+static py::tuple allocate_tensor_for_copy(
+    std::vector<int64_t> shape,
+    const std::string& dtype_str)
+{
+    MNDType dtype = parse_dtype(dtype_str);
+    MNDevice& device = MNDevice::instance();
+    MNShape mn_shape(shape);
+    MNTensor tensor = MNTensor::empty(mn_shape, dtype, device);
+    uintptr_t data_ptr = reinterpret_cast<uintptr_t>(tensor.raw_data());
+    return py::make_tuple(data_ptr, tensor);
 }
 
 void bind_interop(py::module_& m) {
@@ -130,6 +186,12 @@ void bind_interop(py::module_& m) {
           py::arg("shape"),
           py::arg("dtype"),
           "Create MNTensor by copying from CPU memory into Metal buffer");
+
+    // Direct buffer target: allocate Metal buffer, return CPU ptr + MNTensor
+    m.def("allocate_tensor_for_copy", &allocate_tensor_for_copy,
+          py::arg("shape"),
+          py::arg("dtype"),
+          "Allocate Metal Shared buffer and return (cpu_ptr, MNTensor) for direct copy");
 }
 
 } // namespace python

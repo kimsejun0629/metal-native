@@ -18,14 +18,11 @@ kernel void add_fp32(device const float* a      [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        // Process 4 elements - compiler will vectorize this
-        float4 va = float4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
-        float4 vb = float4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        // Coalesced 128-bit vector load
+        float4 va = *reinterpret_cast<device const float4*>(a + idx);
+        float4 vb = *reinterpret_cast<device const float4*>(b + idx);
         float4 vr = va + vb;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device float4*>(output + idx) = vr;
     } else {
         // Tail: handle remaining elements
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
@@ -41,13 +38,10 @@ kernel void add_fp16(device const half* a      [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        half4 va = half4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
-        half4 vb = half4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        half4 va = *reinterpret_cast<device const half4*>(a + idx);
+        half4 vb = *reinterpret_cast<device const half4*>(b + idx);
         half4 vr = va + vb;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device half4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = a[i] + b[i];
@@ -66,13 +60,10 @@ kernel void sub_fp32(device const float* a      [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        float4 va = float4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
-        float4 vb = float4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        float4 va = *reinterpret_cast<device const float4*>(a + idx);
+        float4 vb = *reinterpret_cast<device const float4*>(b + idx);
         float4 vr = va - vb;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device float4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = a[i] - b[i];
@@ -87,13 +78,10 @@ kernel void sub_fp16(device const half* a      [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        half4 va = half4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
-        half4 vb = half4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        half4 va = *reinterpret_cast<device const half4*>(a + idx);
+        half4 vb = *reinterpret_cast<device const half4*>(b + idx);
         half4 vr = va - vb;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device half4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = a[i] - b[i];
@@ -112,13 +100,10 @@ kernel void mul_fp32(device const float* a      [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        float4 va = float4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
-        float4 vb = float4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        float4 va = *reinterpret_cast<device const float4*>(a + idx);
+        float4 vb = *reinterpret_cast<device const float4*>(b + idx);
         float4 vr = va * vb;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device float4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = a[i] * b[i];
@@ -133,13 +118,10 @@ kernel void mul_fp16(device const half* a      [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        half4 va = half4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
-        half4 vb = half4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        half4 va = *reinterpret_cast<device const half4*>(a + idx);
+        half4 vb = *reinterpret_cast<device const half4*>(b + idx);
         half4 vr = va * vb;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device half4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = a[i] * b[i];
@@ -158,13 +140,10 @@ kernel void div_fp32(device const float* a      [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        float4 va = float4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
-        float4 vb = float4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        float4 va = *reinterpret_cast<device const float4*>(a + idx);
+        float4 vb = *reinterpret_cast<device const float4*>(b + idx);
         float4 vr = va / vb;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device float4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = a[i] / b[i];
@@ -179,13 +158,10 @@ kernel void div_fp16(device const half* a      [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        half4 va = half4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
-        half4 vb = half4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        half4 va = *reinterpret_cast<device const half4*>(a + idx);
+        half4 vb = *reinterpret_cast<device const half4*>(b + idx);
         half4 vr = va / vb;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device half4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = a[i] / b[i];
@@ -203,12 +179,9 @@ kernel void exp_fp32(device const float* input  [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        float4 vi = float4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 vi = *reinterpret_cast<device const float4*>(input + idx);
         float4 vr = exp(vi);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device float4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = exp(input[i]);
@@ -222,12 +195,9 @@ kernel void exp_fp16(device const half* input  [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        half4 vi = half4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        half4 vi = *reinterpret_cast<device const half4*>(input + idx);
         half4 vr = exp(vi);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device half4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = exp(input[i]);
@@ -245,12 +215,9 @@ kernel void log_fp32(device const float* input  [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        float4 vi = float4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 vi = *reinterpret_cast<device const float4*>(input + idx);
         float4 vr = log(vi);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device float4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = log(input[i]);
@@ -264,12 +231,9 @@ kernel void log_fp16(device const half* input  [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        half4 vi = half4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        half4 vi = *reinterpret_cast<device const half4*>(input + idx);
         half4 vr = log(vi);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device half4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = log(input[i]);
@@ -289,12 +253,9 @@ kernel void add_scalar_fp32(device const float* input  [[buffer(0)]],
     const uint idx = id * 4;
     const float s = scalar[0];
     if (idx + 3 < num_elements) {
-        float4 vi = float4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 vi = *reinterpret_cast<device const float4*>(input + idx);
         float4 vr = vi + s;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device float4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = input[i] + s;
@@ -310,12 +271,9 @@ kernel void add_scalar_fp16(device const half* input  [[buffer(0)]],
     const uint idx = id * 4;
     const half s = scalar[0];
     if (idx + 3 < num_elements) {
-        half4 vi = half4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        half4 vi = *reinterpret_cast<device const half4*>(input + idx);
         half4 vr = vi + s;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device half4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = input[i] + s;
@@ -335,12 +293,9 @@ kernel void mul_scalar_fp32(device const float* input  [[buffer(0)]],
     const uint idx = id * 4;
     const float s = scalar[0];
     if (idx + 3 < num_elements) {
-        float4 vi = float4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 vi = *reinterpret_cast<device const float4*>(input + idx);
         float4 vr = vi * s;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device float4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = input[i] * s;
@@ -356,12 +311,9 @@ kernel void mul_scalar_fp16(device const half* input  [[buffer(0)]],
     const uint idx = id * 4;
     const half s = scalar[0];
     if (idx + 3 < num_elements) {
-        half4 vi = half4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        half4 vi = *reinterpret_cast<device const half4*>(input + idx);
         half4 vr = vi * s;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device half4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = input[i] * s;
@@ -381,12 +333,9 @@ kernel void sub_scalar_fp32(device const float* input  [[buffer(0)]],
     const uint idx = id * 4;
     const float s = scalar[0];
     if (idx + 3 < num_elements) {
-        float4 vi = float4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 vi = *reinterpret_cast<device const float4*>(input + idx);
         float4 vr = vi - s;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device float4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = input[i] - s;
@@ -402,12 +351,9 @@ kernel void sub_scalar_fp16(device const half* input  [[buffer(0)]],
     const uint idx = id * 4;
     const half s = scalar[0];
     if (idx + 3 < num_elements) {
-        half4 vi = half4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        half4 vi = *reinterpret_cast<device const half4*>(input + idx);
         half4 vr = vi - s;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device half4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = input[i] - s;
@@ -427,12 +373,9 @@ kernel void div_scalar_fp32(device const float* input  [[buffer(0)]],
     const uint idx = id * 4;
     const float s = scalar[0];
     if (idx + 3 < num_elements) {
-        float4 vi = float4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 vi = *reinterpret_cast<device const float4*>(input + idx);
         float4 vr = vi / s;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device float4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = input[i] / s;
@@ -448,12 +391,9 @@ kernel void div_scalar_fp16(device const half* input  [[buffer(0)]],
     const uint idx = id * 4;
     const half s = scalar[0];
     if (idx + 3 < num_elements) {
-        half4 vi = half4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        half4 vi = *reinterpret_cast<device const half4*>(input + idx);
         half4 vr = vi / s;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device half4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = input[i] / s;
@@ -471,12 +411,9 @@ kernel void sqrt_fp32(device const float* input  [[buffer(0)]],
                       uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        float4 vi = float4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 vi = *reinterpret_cast<device const float4*>(input + idx);
         float4 vr = sqrt(vi);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device float4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = sqrt(input[i]);
@@ -490,12 +427,9 @@ kernel void sqrt_fp16(device const half* input  [[buffer(0)]],
                       uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        half4 vi = half4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        half4 vi = *reinterpret_cast<device const half4*>(input + idx);
         half4 vr = sqrt(vi);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device half4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = sqrt(input[i]);
@@ -513,12 +447,9 @@ kernel void abs_fp32(device const float* input  [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        float4 vi = float4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 vi = *reinterpret_cast<device const float4*>(input + idx);
         float4 vr = abs(vi);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device float4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = abs(input[i]);
@@ -532,12 +463,9 @@ kernel void abs_fp16(device const half* input  [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        half4 vi = half4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        half4 vi = *reinterpret_cast<device const half4*>(input + idx);
         half4 vr = abs(vi);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device half4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = abs(input[i]);
@@ -555,12 +483,9 @@ kernel void neg_fp32(device const float* input  [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        float4 vi = float4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 vi = *reinterpret_cast<device const float4*>(input + idx);
         float4 vr = -vi;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device float4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = -input[i];
@@ -574,12 +499,9 @@ kernel void neg_fp16(device const half* input  [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        half4 vi = half4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        half4 vi = *reinterpret_cast<device const half4*>(input + idx);
         half4 vr = -vi;
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device half4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = -input[i];
@@ -600,12 +522,9 @@ kernel void clamp_fp32(device const float* input   [[buffer(0)]],
     const float min_val = bounds[0];
     const float max_val = bounds[1];
     if (idx + 3 < num_elements) {
-        float4 vi = float4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        float4 vi = *reinterpret_cast<device const float4*>(input + idx);
         float4 vr = clamp(vi, min_val, max_val);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device float4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = clamp(input[i], min_val, max_val);
@@ -622,12 +541,9 @@ kernel void clamp_fp16(device const half* input   [[buffer(0)]],
     const half min_val = half(bounds[0]);
     const half max_val = half(bounds[1]);
     if (idx + 3 < num_elements) {
-        half4 vi = half4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        half4 vi = *reinterpret_cast<device const half4*>(input + idx);
         half4 vr = clamp(vi, min_val, max_val);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device half4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = clamp(input[i], min_val, max_val);
@@ -668,16 +584,13 @@ kernel void add_bf16(device const ushort* a      [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        ushort4 va = ushort4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
-        ushort4 vb = ushort4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        ushort4 va = *reinterpret_cast<device const ushort4*>(a + idx);
+        ushort4 vb = *reinterpret_cast<device const ushort4*>(b + idx);
         float4 fa = bf16x4_to_float4(va);
         float4 fb = bf16x4_to_float4(vb);
         float4 fr = fa + fb;
         ushort4 vr = float4_to_bf16x4(fr);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device ushort4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             float result = bf16_to_float(a[i]) + bf16_to_float(b[i]);
@@ -693,16 +606,13 @@ kernel void sub_bf16(device const ushort* a      [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        ushort4 va = ushort4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
-        ushort4 vb = ushort4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        ushort4 va = *reinterpret_cast<device const ushort4*>(a + idx);
+        ushort4 vb = *reinterpret_cast<device const ushort4*>(b + idx);
         float4 fa = bf16x4_to_float4(va);
         float4 fb = bf16x4_to_float4(vb);
         float4 fr = fa - fb;
         ushort4 vr = float4_to_bf16x4(fr);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device ushort4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             float result = bf16_to_float(a[i]) - bf16_to_float(b[i]);
@@ -718,16 +628,13 @@ kernel void mul_bf16(device const ushort* a      [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        ushort4 va = ushort4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
-        ushort4 vb = ushort4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        ushort4 va = *reinterpret_cast<device const ushort4*>(a + idx);
+        ushort4 vb = *reinterpret_cast<device const ushort4*>(b + idx);
         float4 fa = bf16x4_to_float4(va);
         float4 fb = bf16x4_to_float4(vb);
         float4 fr = fa * fb;
         ushort4 vr = float4_to_bf16x4(fr);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device ushort4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             float result = bf16_to_float(a[i]) * bf16_to_float(b[i]);
@@ -743,16 +650,13 @@ kernel void div_bf16(device const ushort* a      [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        ushort4 va = ushort4(a[idx], a[idx+1], a[idx+2], a[idx+3]);
-        ushort4 vb = ushort4(b[idx], b[idx+1], b[idx+2], b[idx+3]);
+        ushort4 va = *reinterpret_cast<device const ushort4*>(a + idx);
+        ushort4 vb = *reinterpret_cast<device const ushort4*>(b + idx);
         float4 fa = bf16x4_to_float4(va);
         float4 fb = bf16x4_to_float4(vb);
         float4 fr = fa / fb;
         ushort4 vr = float4_to_bf16x4(fr);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device ushort4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             float result = bf16_to_float(a[i]) / bf16_to_float(b[i]);
@@ -767,14 +671,11 @@ kernel void exp_bf16(device const ushort* input  [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        ushort4 vi = ushort4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        ushort4 vi = *reinterpret_cast<device const ushort4*>(input + idx);
         float4 fi = bf16x4_to_float4(vi);
         float4 fr = exp(fi);
         ushort4 vr = float4_to_bf16x4(fr);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device ushort4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = float_to_bf16(exp(bf16_to_float(input[i])));
@@ -788,14 +689,11 @@ kernel void log_bf16(device const ushort* input  [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        ushort4 vi = ushort4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        ushort4 vi = *reinterpret_cast<device const ushort4*>(input + idx);
         float4 fi = bf16x4_to_float4(vi);
         float4 fr = log(fi);
         ushort4 vr = float4_to_bf16x4(fr);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device ushort4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = float_to_bf16(log(bf16_to_float(input[i])));
@@ -809,14 +707,11 @@ kernel void neg_bf16(device const ushort* input  [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        ushort4 vi = ushort4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        ushort4 vi = *reinterpret_cast<device const ushort4*>(input + idx);
         float4 fi = bf16x4_to_float4(vi);
         float4 fr = -fi;
         ushort4 vr = float4_to_bf16x4(fr);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device ushort4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = float_to_bf16(-bf16_to_float(input[i]));
@@ -830,14 +725,11 @@ kernel void abs_bf16(device const ushort* input  [[buffer(0)]],
                      uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        ushort4 vi = ushort4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        ushort4 vi = *reinterpret_cast<device const ushort4*>(input + idx);
         float4 fi = bf16x4_to_float4(vi);
         float4 fr = abs(fi);
         ushort4 vr = float4_to_bf16x4(fr);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device ushort4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = float_to_bf16(abs(bf16_to_float(input[i])));
@@ -851,14 +743,11 @@ kernel void sqrt_bf16(device const ushort* input  [[buffer(0)]],
                       uint id [[thread_position_in_grid]]) {
     const uint idx = id * 4;
     if (idx + 3 < num_elements) {
-        ushort4 vi = ushort4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        ushort4 vi = *reinterpret_cast<device const ushort4*>(input + idx);
         float4 fi = bf16x4_to_float4(vi);
         float4 fr = sqrt(fi);
         ushort4 vr = float4_to_bf16x4(fr);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device ushort4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = float_to_bf16(sqrt(bf16_to_float(input[i])));
@@ -875,14 +764,11 @@ kernel void clamp_bf16(device const ushort* input   [[buffer(0)]],
     const float min_val = bounds[0];
     const float max_val = bounds[1];
     if (idx + 3 < num_elements) {
-        ushort4 vi = ushort4(input[idx], input[idx+1], input[idx+2], input[idx+3]);
+        ushort4 vi = *reinterpret_cast<device const ushort4*>(input + idx);
         float4 fi = bf16x4_to_float4(vi);
         float4 fr = clamp(fi, min_val, max_val);
         ushort4 vr = float4_to_bf16x4(fr);
-        output[idx]   = vr.x;
-        output[idx+1] = vr.y;
-        output[idx+2] = vr.z;
-        output[idx+3] = vr.w;
+        *reinterpret_cast<device ushort4*>(output + idx) = vr;
     } else {
         for (uint i = idx; i < min(idx + 4, num_elements); i++) {
             output[i] = float_to_bf16(clamp(bf16_to_float(input[i]), min_val, max_val));

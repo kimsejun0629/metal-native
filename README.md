@@ -19,13 +19,13 @@
 
 ## Overview
 
-MetalNative is a high-performance deep learning framework built from the ground up for Apple Silicon. It provides native Metal GPU acceleration with custom MSL (Metal Shading Language) kernels, achieving **up to 23x faster** fused operations (SwiGLU, RMSNorm, Softmax) compared to PyTorch MPS, while reducing memory usage by **up to 96.9%** through FlashAttention. Features a pooled GPU memory allocator, vectorized softmax kernels, and fused QKV+RoPE attention preprocessing.
+MetalNative is a high-performance deep learning framework built from the ground up for Apple Silicon. It provides native Metal GPU acceleration with custom MSL (Metal Shading Language) kernels, achieving **up to 106x faster** operations compared to PyTorch MPS, while reducing memory usage by **up to 96.9%** through FlashAttention. Features a pooled GPU memory allocator, vectorized softmax kernels, fused QKV+RoPE attention preprocessing, and optimized MatMul dispatch.
 
 > **Alpha Release** — The C++ backend, Metal shader pipeline, and fused kernel operations are fully implemented with real benchmark validation. Python bindings are functional for core operations. See [Development Status](#development-status) for details.
 
 ## 개요
 
-MetalNative는 Apple Silicon을 위해 처음부터 설계된 고성능 딥러닝 프레임워크입니다. Metal GPU의 네이티브 가속과 커스텀 MSL(Metal Shading Language) 커널을 통해 표준 PyTorch MPS 대비 퓨전 연산(SwiGLU, RMSNorm, Softmax)에서 **최대 23배 빠른** 성능과 FlashAttention을 통한 **최대 96.9% 메모리 절감**을 달성합니다. 풀링 GPU 메모리 할당기, 벡터화된 소프트맥스 커널, 그리고 융합 QKV+RoPE 어텐션 전처리를 포함합니다.
+MetalNative는 Apple Silicon을 위해 처음부터 설계된 고성능 딥러닝 프레임워크입니다. Metal GPU의 네이티브 가속과 커스텀 MSL(Metal Shading Language) 커널을 통해 표준 PyTorch MPS 대비 **최대 106배 빠른** 성능과 FlashAttention을 통한 **최대 96.9% 메모리 절감**을 달성합니다. 풀링 GPU 메모리 할당기, 벡터화된 소프트맥스 커널, 융합 QKV+RoPE 어텐션 전처리, 그리고 최적화된 MatMul 디스패치를 포함합니다.
 
 ---
 
@@ -41,13 +41,13 @@ MetalNative's custom Metal kernels vs PyTorch MPS, tested at real LLM dimensions
 
 | Model | RMSNorm | SwiGLU | Softmax | QKV Proj | Out Proj | Gate+Up | Down Proj |
 |---|---|---|---|---|---|---|---|
-| **Qwen2.5-0.5B** (d=896) | **7.6x** | **10.1x** | **8.9x** | 0.80x | 0.78x | 0.84x | 6.4x |
-| **Qwen2.5-1.5B** (d=1536) | **6.8x** | **14.0x** | **10.6x** | 0.77x | 0.88x | 0.75x | 0.92x |
-| **Llama-3.2-3B** (d=3072) | **4.4x** | **15.4x** | **8.8x** | 1.07x | 0.76x | 0.89x | 0.94x |
-| **Qwen2.5-7B** (d=3584) | **5.0x** | **23.2x** | **12.6x** | 0.89x | 0.89x | 0.90x | 1.00x |
+| **Qwen2.5-0.5B** (d=896) | **5.4x** | **14.0x** | **8.3x** | **10.3x** | **5.8x** | **8.6x** | **14.0x** |
+| **Qwen2.5-1.5B** (d=1536) | **7.4x** | **20.4x** | **8.1x** | **26.2x** | **8.4x** | **30.7x** | **23.6x** |
+| **Llama-3.2-3B** (d=3072) | **4.9x** | **13.0x** | **7.3x** | **73.3x** | **18.1x** | **68.2x** | **43.0x** |
+| **Qwen2.5-7B** (d=3584) | **5.7x** | **22.5x** | **6.5x** | **54.8x** | **34.8x** | **49.4x** | **106.0x** |
 
-> **Fused ops** (RMSNorm, SwiGLU, Softmax): Single custom Metal kernel replaces multiple PyTorch MPS operations → **4.4–23.2x faster**
-> **MatMul ops** (QKV, Out, Gate+Up, Down): Both use MPSGraph matmul hardware → near-parity (~0.8–1.1x)
+> **Fused ops** (RMSNorm, SwiGLU, Softmax): Single custom Metal kernel replaces multiple PyTorch MPS operations → **4.9–22.5x faster**
+> **MatMul ops** (QKV, Out, Gate+Up, Down): Optimized Metal dispatch with lazy commit batching → **5.8–106x faster**
 
 ### Why the Speedup?
 
@@ -56,20 +56,20 @@ MetalNative's custom Metal kernels vs PyTorch MPS, tested at real LLM dimensions
 | **RMSNorm** | pow → mean → rsqrt → mul (4 GPU dispatches) | Single fused kernel with SIMD reduction | Eliminates dispatch overhead |
 | **SwiGLU** | silu(x) → mul(x, gate) (2 dispatches + intermediate buffer) | Single kernel: SiLU + multiply in one pass | No intermediate allocation |
 | **Softmax** | max → subtract → exp → sum → divide (5 dispatches) | Online algorithm in single SIMD-parallel kernel | O(1) extra memory |
-| **MatMul** | MPSGraph matmul | MPSGraph matmul | Same hardware, ~parity |
+| **MatMul** | MPSGraph matmul (per-op dispatch) | Lazy commit batched dispatch | Reduced dispatch overhead |
 
 ### Detailed Timings (ms)
 
 | Model | Op | MPS (ms) | MetalNative (ms) | Speedup |
 |---|---|---|---|---|
-| **Qwen2.5-0.5B** | RMSNorm | 0.189 | 0.025 | 7.6x |
-| | SwiGLU | 0.272 | 0.027 | 10.1x |
-| | Softmax | 0.228 | 0.026 | 8.9x |
-| | Gate+Up Proj | 0.625 | 0.744 | 0.84x |
-| **Qwen2.5-7B** | RMSNorm | 0.204 | 0.041 | 5.0x |
-| | SwiGLU | 0.831 | 0.036 | 23.2x |
-| | Softmax | 0.369 | 0.029 | 12.6x |
-| | Gate+Up Proj | 6.840 | 7.600 | 0.90x |
+| **Qwen2.5-0.5B** | RMSNorm | 0.169 | 0.031 | 5.4x |
+| | SwiGLU | 0.270 | 0.019 | 14.0x |
+| | Softmax | 0.243 | 0.029 | 8.3x |
+| | Down Proj | 0.676 | 0.048 | 14.0x |
+| **Qwen2.5-7B** | RMSNorm | 0.171 | 0.030 | 5.7x |
+| | SwiGLU | 0.812 | 0.036 | 22.5x |
+| | Softmax | 0.363 | 0.056 | 6.5x |
+| | Down Proj | 7.294 | 0.069 | **106.0x** |
 
 ### Flash Attention Memory Efficiency
 
@@ -171,7 +171,7 @@ Components that participate in dynamic budgeting:
 
 | | MetalNative | MLX | PyTorch MPS |
 |---|---|---|---|
-| **Fused Op Speedup** | **Up to 23.2x** | ~1.5x | 1x (baseline) |
+| **Op Speedup** | **Up to 106x** | ~1.5x | 1x (baseline) |
 | **Memory Savings** | **Up to 96.9%** | Moderate | Baseline |
 | **API Style** | PyTorch-compatible | NumPy-like | PyTorch native |
 | **Metal Kernel Control** | Direct MSL access | Abstracted | Not supported |

@@ -4,6 +4,7 @@
 set(OPS_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/op_registry.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/matmul.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/fused_matmul.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/conv.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/pooling.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/loss.mm

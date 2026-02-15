@@ -12,14 +12,30 @@ using namespace metal;
 
 kernel void copy_fp32(device const float* input  [[buffer(0)]],
                       device float*       output [[buffer(1)]],
+                      constant uint&      num_elements [[buffer(2)]],
                       uint id [[thread_position_in_grid]]) {
-    output[id] = input[id];
+    const uint idx = id * 4;
+    if (idx + 3 < num_elements) {
+        *reinterpret_cast<device float4*>(output + idx) = *reinterpret_cast<device const float4*>(input + idx);
+    } else {
+        for (uint i = idx; i < min(idx + 4, num_elements); i++) {
+            output[i] = input[i];
+        }
+    }
 }
 
 kernel void copy_fp16(device const half* input  [[buffer(0)]],
                       device half*       output [[buffer(1)]],
+                      constant uint&      num_elements [[buffer(2)]],
                       uint id [[thread_position_in_grid]]) {
-    output[id] = input[id];
+    const uint idx = id * 4;
+    if (idx + 3 < num_elements) {
+        *reinterpret_cast<device half4*>(output + idx) = *reinterpret_cast<device const half4*>(input + idx);
+    } else {
+        for (uint i = idx; i < min(idx + 4, num_elements); i++) {
+            output[i] = input[i];
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -84,5 +100,47 @@ kernel void transpose_2d_fp16(device const half* input   [[buffer(0)]],
     uint out_y = tgid.x * TILE_DIM + lid.y;
     if (out_x < rows && out_y < cols) {
         output[out_y * rows + out_x] = tile[lid.x][lid.y];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dtype cast kernels (vectorized for throughput)
+// ---------------------------------------------------------------------------
+
+/// Cast FP32 to FP16 (vectorized: 4 elements per thread)
+kernel void cast_fp32_to_fp16(device const float* input  [[buffer(0)]],
+                               device half*        output [[buffer(1)]],
+                               constant uint&      count  [[buffer(2)]],
+                               uint tid [[thread_position_in_grid]]) {
+    const uint base_idx = tid * 4;
+    if (base_idx + 3 < count) {
+        // Vectorized path: process 4 elements
+        float4 val = *reinterpret_cast<device const float4*>(input + base_idx);
+        half4 converted = half4(val);
+        *reinterpret_cast<device half4*>(output + base_idx) = converted;
+    } else if (base_idx < count) {
+        // Scalar tail: handle remaining elements
+        for (uint i = base_idx; i < count; ++i) {
+            output[i] = half(input[i]);
+        }
+    }
+}
+
+/// Cast FP16 to FP32 (vectorized: 4 elements per thread)
+kernel void cast_fp16_to_fp32(device const half*  input  [[buffer(0)]],
+                               device float*       output [[buffer(1)]],
+                               constant uint&      count  [[buffer(2)]],
+                               uint tid [[thread_position_in_grid]]) {
+    const uint base_idx = tid * 4;
+    if (base_idx + 3 < count) {
+        // Vectorized path: process 4 elements
+        half4 val = *reinterpret_cast<device const half4*>(input + base_idx);
+        float4 converted = float4(val);
+        *reinterpret_cast<device float4*>(output + base_idx) = converted;
+    } else if (base_idx < count) {
+        // Scalar tail: handle remaining elements
+        for (uint i = base_idx; i < count; ++i) {
+            output[i] = float(input[i]);
+        }
     }
 }

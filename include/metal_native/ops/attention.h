@@ -23,16 +23,27 @@ class KVCache;
 /// traffic. Online softmax ensures numerical stability in a single pass.
 /// Optimized for Apple Silicon GPU architecture.
 ///
+/// Supports Grouped Query Attention (GQA), Multi-Query Attention (MQA),
+/// and standard Multi-Head Attention (MHA):
+/// - MHA: num_heads == num_kv_heads (e.g., 32 Q heads, 32 KV heads)
+/// - GQA: num_heads > num_kv_heads, multiple Q heads share KV heads
+///        (e.g., Llama 3: 32 Q heads, 8 KV heads, group_ratio=4)
+/// - MQA: num_kv_heads == 1, all Q heads share single KV head
+///        (e.g., Falcon: 32 Q heads, 1 KV head, group_ratio=32)
+///
+/// GQA reduces KV cache size by group_ratio (4x for Llama 3, 8x for Mistral).
+///
 /// @param query        Query tensor: [batch, num_heads, seq_len_q, head_dim]
-/// @param key          Key tensor: [batch, num_heads, seq_len_k, head_dim]
-/// @param value        Value tensor: [batch, num_heads, seq_len_v, head_dim]
+/// @param key          Key tensor: [batch, num_kv_heads, seq_len_k, head_dim]
+/// @param value        Value tensor: [batch, num_kv_heads, seq_len_v, head_dim]
 /// @param mask         Optional attention mask: [batch, 1, seq_len_q, seq_len_k]
 ///                     or nullptr. Use for causal masking (upper-triangular).
 /// @param scale        Scale factor (typically 1.0 / sqrt(head_dim)).
 /// @return             Output tensor: [batch, num_heads, seq_len_q, head_dim]
 ///
-/// @throws MNException(InvalidArgument) if shapes are incompatible or
-///         if seq_len_k != seq_len_v.
+/// @throws MNException(InvalidArgument) if shapes are incompatible,
+///         if seq_len_k != seq_len_v, if num_heads % num_kv_heads != 0,
+///         or if GQA is used with Float32 (currently FP16 only).
 MNTensor flash_attention(const MNTensor& query,
                          const MNTensor& key,
                          const MNTensor& value,
@@ -95,5 +106,19 @@ void fused_qkv_split_rope(
     int64_t num_heads,
     int64_t head_dim,
     int64_t start_pos);
+
+/// Enable or disable texture-backed attention (experimental)
+///
+/// When enabled, FlashAttention uses Metal texture2d for the attention score
+/// matrix (QK^T) instead of threadgroup memory, leveraging Apple Silicon's
+/// texture cache hardware. Currently FP32 MHA only.
+///
+/// @param enable  true to enable texture attention, false for standard path
+void set_texture_attention(bool enable);
+
+/// Check if texture-backed attention is enabled
+///
+/// @return true if texture attention is enabled, false otherwise
+bool texture_attention_enabled();
 
 } // namespace metal_native

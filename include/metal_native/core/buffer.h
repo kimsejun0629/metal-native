@@ -103,16 +103,26 @@ public:
 
     /// Wrap an externally-owned pointer as an MNBuffer (zero-copy).
     /// The caller is responsible for keeping the external memory alive.
+    ///
+    /// If the pointer is not page-aligned (common with MPS GPU pointers),
+    /// the pointer is aligned DOWN to the nearest 16 KB boundary and the
+    /// alignment offset is returned via @p out_offset.  The caller must
+    /// pass this offset when constructing MNTensor so that Metal command
+    /// encoders address the correct start of data.
+    ///
     /// @param device  The Metal device.
-    /// @param data_ptr  CPU-accessible pointer to existing MTLBuffer contents.
-    /// @param size  Size in bytes.
+    /// @param data_ptr  Pointer to existing MTLBuffer contents (GPU or CPU).
+    /// @param size  Size in bytes of the actual data region.
     /// @param release_callback  Optional callback invoked when the buffer is destroyed.
+    /// @param out_offset  If non-null, receives the byte offset from the
+    ///                    Metal buffer base to the actual data start.
     /// @return Shared pointer to the wrapping buffer.
     static std::shared_ptr<MNBuffer> wrap_external(
         MNDevice& device,
         void* data_ptr,
         size_t size,
-        std::function<void()> release_callback = nullptr);
+        std::function<void()> release_callback = nullptr,
+        size_t* out_offset = nullptr);
 
 private:
     /// Default constructor used only by create_zero_copy.

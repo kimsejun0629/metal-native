@@ -358,15 +358,28 @@ MNTensor fused_residual_norm(const MNTensor& input, const MNTensor& residual,
     MNTensor output = MNTensor::empty(input.shape(), input.dtype(), device);
 
     const bool use_large = (norm_size >= 2048);
+    const bool use_regcache = use_large && (norm_size <= 8192);  // fits in 32 registers per thread (8192/256=32)
 
     @autoreleasepool {
         CommandPipeline& cmd_pipeline = device.command_pipeline();
 
         const char* kernel_name = nullptr;
         if (input.dtype() == MNDType::Float32) {
-            kernel_name = use_large ? "fused_residual_rms_norm_large_fp32" : "fused_residual_rms_norm_fp32";
+            if (use_regcache) {
+                kernel_name = "fused_residual_rms_norm_regcache_fp32";
+            } else if (use_large) {
+                kernel_name = "fused_residual_rms_norm_large_fp32";
+            } else {
+                kernel_name = "fused_residual_rms_norm_fp32";
+            }
         } else {
-            kernel_name = use_large ? "fused_residual_rms_norm_large_fp16" : "fused_residual_rms_norm_fp16";
+            if (use_regcache) {
+                kernel_name = "fused_residual_rms_norm_regcache_fp16";
+            } else if (use_large) {
+                kernel_name = "fused_residual_rms_norm_large_fp16";
+            } else {
+                kernel_name = "fused_residual_rms_norm_fp16";
+            }
         }
 
         id<MTLComputePipelineState> pipeline =

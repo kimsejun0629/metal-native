@@ -1,0 +1,87 @@
+{
+  "timestamp": "2026-02-11T15:49:37.957404",
+  "system": {
+    "chip": "arm",
+    "os": "26.3",
+    "pytorch": "2.10.0",
+    "mps_available": true,
+    "memory_gb": 36
+  },
+  "config": {
+    "max_new_tokens": 100,
+    "num_runs": 3,
+    "prompt": "The future of artificial intelligence is"
+  },
+  "models": [
+    {
+      "model": "Qwen/Qwen2.5-0.5B",
+      "max_new_tokens": 100,
+      "status": "success",
+      "params_b": 0.49,
+      "load_time_s": 1.1,
+      "input_tokens": 6,
+      "prefill_ms": 14.51,
+      "generation_time_ms": 1632.6,
+      "generated_tokens": 100,
+      "tokens_per_second": 61.3,
+      "ms_per_token": 16.33,
+      "decode_tokens_per_second": 61.2,
+      "decode_ms_per_token": 16.34,
+      "memory_mb": 944.3
+    },
+    {
+      "model": "Qwen/Qwen2.5-1.5B",
+      "max_new_tokens": 100,
+      "status": "success",
+      "params_b": 1.54,
+      "load_time_s": 2.2,
+      "input_tokens": 6,
+      "prefill_ms": 16.14,
+      "generation_time_ms": 1733.9,
+      "generated_tokens": 100,
+      "tokens_per_second": 57.7,
+      "ms_per_token": 17.34,
+      "decode_tokens_per_second": 57.6,
+      "decode_ms_per_token": 17.35,
+      "memory_mb": 2946.9
+    },
+    {
+      "model": "Qwen/Qwen2.5-3B",
+      "max_new_tokens": 100,
+      "status": "success",
+      "params_b": 3.09,
+      "load_time_s": 4.3,
+      "input_tokens": 6,
+      "prefill_ms": 25.84,
+      "generation_time_ms": 2692.8,
+      "generated_tokens": 100,
+      "tokens_per_second": 37.1,
+      "ms_per_token": 26.93,
+      "decode_tokens_per_second": 37.1,
+      "decode_ms_per_token": 26.94,
+      "memory_mb": 5889.1
+    },
+    {
+      "model": "Qwen/Qwen2.5-7B",
+      "max_new_tokens": 100,
+      "status": "success",
+      "params_b": 7.62,
+      "load_time_s": 12.7,
+      "input_tokens": 6,
+      "prefill_ms": 47.82,
+      "generation_time_ms": 5175.9,
+      "generated_tokens": 100,
+      "tokens_per_second": 19.3,
+      "ms_per_token": 51.76,
+      "decode_tokens_per_second": 19.3,
+      "decode_ms_per_token": 51.8,
+      "memory_mb": 14529.3
+    },
+    {
+      "model": "Qwen/Qwen2.5-14B",
+      "max_new_tokens": 100,
+      "status": "error",
+      "error": "Invalid buffer size: 27.51 GiB"
+    }
+  ]
+}

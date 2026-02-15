@@ -299,7 +299,103 @@ class Tensor:
 
     def __neg__(self) -> 'Tensor':
         """Unary negation."""
-        return self.__mul__(-1)
+        from metal_native import _C
+        return Tensor(_native_handle=_C.neg(self._handle))
+
+    # Shape operations
+
+    def reshape(self, *shape: int) -> 'Tensor':
+        """Return a view with a new shape."""
+        from metal_native import _C
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = tuple(shape[0])
+        return Tensor(_native_handle=self._handle.reshape(list(shape)))
+
+    def view(self, *shape: int) -> 'Tensor':
+        """Return a view with a new shape (alias for reshape)."""
+        return self.reshape(*shape)
+
+    def transpose(self, dim0: int, dim1: int) -> 'Tensor':
+        """Transpose two dimensions. Returns a new contiguous tensor."""
+        np_data = self.numpy()
+        axes = list(range(self.ndim))
+        axes[dim0], axes[dim1] = axes[dim1], axes[dim0]
+        transposed = np.transpose(np_data, axes).copy()
+        return Tensor(data=transposed, dtype=self.dtype)
+
+    def contiguous(self) -> 'Tensor':
+        """Return a contiguous tensor (clones if not already contiguous)."""
+        from metal_native import _C
+        if self._handle.is_contiguous():
+            return self
+        return Tensor(_native_handle=self._handle.clone())
+
+    # Reduction operations
+
+    def sum(self, dim: Optional[int] = None, keepdim: bool = False) -> 'Tensor':
+        """Sum along a dimension."""
+        from metal_native import _C
+        if dim is None:
+            # Sum all elements - reduce along each dim sequentially
+            result = self
+            for d in range(self.ndim - 1, -1, -1):
+                result = Tensor(_native_handle=_C.reduce_sum(result._handle, d, False))
+            return result
+        return Tensor(_native_handle=_C.reduce_sum(self._handle, dim, keepdim))
+
+    def mean(self, dim: Optional[int] = None, keepdim: bool = False) -> 'Tensor':
+        """Mean along a dimension."""
+        from metal_native import _C
+        if dim is None:
+            result = self
+            for d in range(self.ndim - 1, -1, -1):
+                result = Tensor(_native_handle=_C.reduce_mean(result._handle, d, False))
+            return result
+        return Tensor(_native_handle=_C.reduce_mean(self._handle, dim, keepdim))
+
+    def max(self, dim: Optional[int] = None, keepdim: bool = False) -> 'Tensor':
+        """Max along a dimension."""
+        from metal_native import _C
+        if dim is None:
+            result = self
+            for d in range(self.ndim - 1, -1, -1):
+                result = Tensor(_native_handle=_C.reduce_max(result._handle, d, False))
+            return result
+        return Tensor(_native_handle=_C.reduce_max(self._handle, dim, keepdim))
+
+    # Unary math operations
+
+    def exp(self) -> 'Tensor':
+        """Element-wise exponential."""
+        from metal_native import _C
+        return Tensor(_native_handle=_C.exp(self._handle))
+
+    def log(self) -> 'Tensor':
+        """Element-wise natural logarithm."""
+        from metal_native import _C
+        return Tensor(_native_handle=_C.log(self._handle))
+
+    def sqrt(self) -> 'Tensor':
+        """Element-wise square root."""
+        from metal_native import _C
+        return Tensor(_native_handle=_C.sqrt(self._handle))
+
+    def abs(self) -> 'Tensor':
+        """Element-wise absolute value."""
+        from metal_native import _C
+        return Tensor(_native_handle=_C.abs(self._handle))
+
+    # Activation functions
+
+    def relu(self) -> 'Tensor':
+        """ReLU activation: max(0, x)."""
+        from metal_native import _C
+        return Tensor(_native_handle=_C.clamp(self._handle, 0.0, float('inf')))
+
+    def softmax(self, dim: int = -1) -> 'Tensor':
+        """Softmax along a dimension."""
+        from metal_native import _C
+        return Tensor(_native_handle=_C.softmax(self._handle, dim))
 
     # PyTorch function protocol (basic structure)
     def __torch_function__(self, func: Callable, types: Tuple, args: Tuple, kwargs: Optional[dict] = None) -> Any:

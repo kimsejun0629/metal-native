@@ -65,8 +65,11 @@ def benchmark_metal_native(size: int, iterations: int, warmup: int) -> float:
     if not HAS_METAL_NATIVE:
         return float('nan')
 
-    a = mn.from_numpy(np.random.randn(size, size).astype(np.float32))
-    b = mn.from_numpy(np.random.randn(size, size).astype(np.float32))
+    try:
+        a = mn.from_numpy(np.random.randn(size, size).astype(np.float32))
+        b = mn.from_numpy(np.random.randn(size, size).astype(np.float32))
+    except (RuntimeError, NotImplementedError):
+        return float('nan')
 
     # Warmup
     for _ in range(warmup):

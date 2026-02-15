@@ -54,7 +54,7 @@ def naive_attention_numpy(q: np.ndarray, k: np.ndarray, v: np.ndarray) -> np.nda
 
 
 def benchmark_numpy_attention(batch: int, heads: int, seq_len: int, head_dim: int,
-                               iterations: int, warmup: int) -> Tuple[float, float]:
+                               iterations: int, warmup: int, dtype: str = 'float32') -> Tuple[float, float]:
     """Benchmark NumPy attention.
 
     Args:
@@ -68,9 +68,10 @@ def benchmark_numpy_attention(batch: int, heads: int, seq_len: int, head_dim: in
     Returns:
         Tuple of (avg_time_ms, memory_mb)
     """
-    q = np.random.randn(batch, heads, seq_len, head_dim).astype(np.float32)
-    k = np.random.randn(batch, heads, seq_len, head_dim).astype(np.float32)
-    v = np.random.randn(batch, heads, seq_len, head_dim).astype(np.float32)
+    np_dtype = np.float16 if dtype == 'float16' else np.float32
+    q = np.random.randn(batch, heads, seq_len, head_dim).astype(np_dtype)
+    k = np.random.randn(batch, heads, seq_len, head_dim).astype(np_dtype)
+    v = np.random.randn(batch, heads, seq_len, head_dim).astype(np_dtype)
 
     # Warmup
     for _ in range(warmup):
@@ -83,15 +84,16 @@ def benchmark_numpy_attention(batch: int, heads: int, seq_len: int, head_dim: in
     end = time.perf_counter()
 
     # Estimate memory usage (input + intermediate attention matrix + output)
+    elem_bytes = 2 if dtype == 'float16' else 4
     memory_mb = (q.nbytes + k.nbytes + v.nbytes +
-                 batch * heads * seq_len * seq_len * 4 +  # attention scores
+                 batch * heads * seq_len * seq_len * elem_bytes +  # attention scores
                  output.nbytes) / (1024 ** 2)
 
     return (end - start) * 1000 / iterations, memory_mb
 
 
 def benchmark_metal_native_attention(batch: int, heads: int, seq_len: int, head_dim: int,
-                                      iterations: int, warmup: int) -> Tuple[float, float]:
+                                      iterations: int, warmup: int, dtype: str = 'float32') -> Tuple[float, float]:
     """Benchmark MetalNative FlashAttention.
 
     Args:
@@ -110,34 +112,39 @@ def benchmark_metal_native_attention(batch: int, heads: int, seq_len: int, head_
 
     # Note: This assumes MetalNative has a flash_attention function
     # If not implemented, this will need to use the naive attention
-    q = mn.from_numpy(np.random.randn(batch, heads, seq_len, head_dim).astype(np.float32))
-    k = mn.from_numpy(np.random.randn(batch, heads, seq_len, head_dim).astype(np.float32))
-    v = mn.from_numpy(np.random.randn(batch, heads, seq_len, head_dim).astype(np.float32))
+    try:
+        np_dtype = np.float16 if dtype == 'float16' else np.float32
+        q = mn.from_numpy(np.random.randn(batch, heads, seq_len, head_dim).astype(np_dtype))
+        k = mn.from_numpy(np.random.randn(batch, heads, seq_len, head_dim).astype(np_dtype))
+        v = mn.from_numpy(np.random.randn(batch, heads, seq_len, head_dim).astype(np_dtype))
+    except (RuntimeError, NotImplementedError):
+        return float('nan'), float('nan')
+
+    # Use actual Metal FlashAttention kernel via C++ binding
+    scale = 1.0 / np.sqrt(head_dim)
 
     # Warmup
     for _ in range(warmup):
-        # Use naive implementation until flash_attention is available
-        scale = 1.0 / np.sqrt(head_dim)
-        scores = q @ k.numpy().transpose(0, 1, 3, 2)  # Placeholder
-        mn.synchronize()
+        _ = mn._C.flash_attention(q._handle, k._handle, v._handle, None, scale)
+        mn._C.synchronize()
 
     # Benchmark
     start = time.perf_counter()
     for _ in range(iterations):
-        # Placeholder for actual flash_attention call
-        scale = 1.0 / np.sqrt(head_dim)
-        scores = q @ k.numpy().transpose(0, 1, 3, 2)
-        mn.synchronize()
+        output = mn._C.flash_attention(q._handle, k._handle, v._handle, None, scale)
+    mn._C.synchronize()
     end = time.perf_counter()
 
     # Memory usage is much lower with FlashAttention (no materialized attention matrix)
-    memory_mb = (q.nbytes + k.nbytes + v.nbytes + q.nbytes) / (1024 ** 2)
+    elem_bytes = 2 if dtype == 'float16' else 4
+    total_elements = batch * heads * seq_len * head_dim
+    memory_mb = (total_elements * elem_bytes * 4) / (1024 ** 2)  # q, k, v, output only
 
     return (end - start) * 1000 / iterations, memory_mb
 
 
 def benchmark_torch_attention(batch: int, heads: int, seq_len: int, head_dim: int,
-                               iterations: int, warmup: int) -> Tuple[float, float]:
+                               iterations: int, warmup: int, dtype: str = 'float32') -> Tuple[float, float]:
     """Benchmark PyTorch scaled_dot_product_attention.
 
     Args:
@@ -155,9 +162,10 @@ def benchmark_torch_attention(batch: int, heads: int, seq_len: int, head_dim: in
         return float('nan'), float('nan')
 
     device = torch.device('mps')
-    q = torch.randn(batch, heads, seq_len, head_dim, device=device, dtype=torch.float32)
-    k = torch.randn(batch, heads, seq_len, head_dim, device=device, dtype=torch.float32)
-    v = torch.randn(batch, heads, seq_len, head_dim, device=device, dtype=torch.float32)
+    torch_dtype = torch.float16 if dtype == 'float16' else torch.float32
+    q = torch.randn(batch, heads, seq_len, head_dim, device=device, dtype=torch_dtype)
+    k = torch.randn(batch, heads, seq_len, head_dim, device=device, dtype=torch_dtype)
+    v = torch.randn(batch, heads, seq_len, head_dim, device=device, dtype=torch_dtype)
 
     # Warmup
     for _ in range(warmup):
@@ -185,8 +193,9 @@ def benchmark_torch_attention(batch: int, heads: int, seq_len: int, head_dim: in
     end = time.perf_counter()
 
     # Memory estimate
+    elem_bytes = 2 if dtype == 'float16' else 4
     memory_mb = (q.element_size() * q.nelement() * 4 +  # q, k, v, output
-                 batch * heads * seq_len * seq_len * 4) / (1024 ** 2)  # attention scores
+                 batch * heads * seq_len * seq_len * elem_bytes) / (1024 ** 2)  # attention scores
 
     return (end - start) * 1000 / iterations, memory_mb
 
@@ -227,19 +236,20 @@ def run_benchmark(configs: List[Dict], iterations: int, warmup: int) -> Dict:
         heads = config['heads']
         seq_len = config['seq_len']
         head_dim = config['head_dim']
+        dtype = config.get('dtype', 'float32')
 
         print(f"\nConfig: batch={batch}, heads={heads}, seq_len={seq_len}, head_dim={head_dim}")
 
         result = {'config': config}
 
         # NumPy
-        numpy_time, numpy_mem = benchmark_numpy_attention(batch, heads, seq_len, head_dim, iterations, warmup)
+        numpy_time, numpy_mem = benchmark_numpy_attention(batch, heads, seq_len, head_dim, iterations, warmup, dtype)
         numpy_throughput = compute_throughput(batch, seq_len, numpy_time)
         result['numpy'] = {'time_ms': numpy_time, 'memory_mb': numpy_mem, 'throughput': numpy_throughput}
         print(f"  NumPy:        {numpy_time:8.3f} ms | {numpy_mem:6.1f} MB | {numpy_throughput:8.1f} tokens/s")
 
         # MetalNative
-        mn_time, mn_mem = benchmark_metal_native_attention(batch, heads, seq_len, head_dim, iterations, warmup)
+        mn_time, mn_mem = benchmark_metal_native_attention(batch, heads, seq_len, head_dim, iterations, warmup, dtype)
         if not np.isnan(mn_time):
             mn_throughput = compute_throughput(batch, seq_len, mn_time)
             speedup = numpy_time / mn_time
@@ -254,7 +264,7 @@ def run_benchmark(configs: List[Dict], iterations: int, warmup: int) -> Dict:
             print(f"  MetalNative:  Not available")
 
         # PyTorch
-        torch_time, torch_mem = benchmark_torch_attention(batch, heads, seq_len, head_dim, iterations, warmup)
+        torch_time, torch_mem = benchmark_torch_attention(batch, heads, seq_len, head_dim, iterations, warmup, dtype)
         if not np.isnan(torch_time):
             torch_throughput = compute_throughput(batch, seq_len, torch_time)
             speedup = numpy_time / torch_time
@@ -291,6 +301,8 @@ def main():
                        help='Number of iterations per benchmark')
     parser.add_argument('--warmup', type=int, default=3,
                        help='Number of warmup iterations')
+    parser.add_argument('--dtype', type=str, default='float32', choices=['float32', 'float16'],
+                       help='Data type for benchmarks (default: float32)')
     parser.add_argument('--output', type=str, default=None,
                        help='Output file for results')
 
@@ -305,7 +317,8 @@ def main():
                     'batch': args.batch,
                     'heads': heads,
                     'seq_len': seq_len,
-                    'head_dim': head_dim
+                    'head_dim': head_dim,
+                    'dtype': args.dtype
                 })
 
     print("FlashAttention Benchmark")
@@ -313,6 +326,7 @@ def main():
     print(f"Configurations: {len(configs)}")
     print(f"Iterations: {args.iterations}")
     print(f"Warmup: {args.warmup}")
+    print(f"Dtype: {args.dtype}")
     print(f"MetalNative available: {HAS_METAL_NATIVE}")
     print(f"PyTorch MPS available: {HAS_TORCH}")
 

@@ -13,8 +13,11 @@
 
 #include "metal_native/future/fast_ops.h"
 #include "metal_native/ops/attention.h"
+#include "metal_native/ops/elementwise.h"
 #include "metal_native/ops/matmul.h"
+#include "metal_native/ops/reduction.h"
 #include "metal_native/ops/softmax.h"
+#include "metal_native/core/device.h"
 #include "metal_native/core/tensor.h"
 
 namespace py = pybind11;
@@ -246,6 +249,137 @@ void bind_ops(py::module_& m) {
           "    scale: Scale factor (typically 1.0 / sqrt(head_dim))\n\n"
           "Returns:\n"
           "    Output tensor [batch, num_heads, seq_len_q, head_dim]");
+
+    // Texture attention control (experimental)
+    m.def("set_texture_attention",
+          &set_texture_attention,
+          py::arg("enable"),
+          "Enable or disable texture-backed attention (experimental)\n\n"
+          "When enabled, FlashAttention uses Metal texture2d for the attention\n"
+          "score matrix instead of threadgroup memory. Currently FP32 MHA only.\n\n"
+          "Args:\n"
+          "    enable: True to enable texture attention, False for standard path");
+
+    m.def("texture_attention_enabled",
+          &texture_attention_enabled,
+          "Check if texture-backed attention is enabled\n\n"
+          "Returns:\n"
+          "    bool: True if texture attention is enabled, False otherwise");
+
+    // ---------------------------------------------------------------------------
+    // Reduction operations
+    // ---------------------------------------------------------------------------
+
+    m.def("reduce_sum",
+          [](const MNTensor& input, int64_t dim, bool keepdim) {
+              MNDevice& device = MNDevice::instance();
+              return reduce_sum(input, dim, keepdim, device);
+          },
+          py::arg("input"), py::arg("dim"), py::arg("keepdim") = false,
+          "Reduce sum along a dimension");
+
+    m.def("reduce_mean",
+          [](const MNTensor& input, int64_t dim, bool keepdim) {
+              MNDevice& device = MNDevice::instance();
+              return reduce_mean(input, dim, keepdim, device);
+          },
+          py::arg("input"), py::arg("dim"), py::arg("keepdim") = false,
+          "Reduce mean along a dimension");
+
+    m.def("reduce_max",
+          [](const MNTensor& input, int64_t dim, bool keepdim) {
+              MNDevice& device = MNDevice::instance();
+              return reduce_max(input, dim, keepdim, device);
+          },
+          py::arg("input"), py::arg("dim"), py::arg("keepdim") = false,
+          "Reduce max along a dimension");
+
+    // ---------------------------------------------------------------------------
+    // Unary math operations
+    // ---------------------------------------------------------------------------
+
+    m.def("exp",
+          [](const MNTensor& x) {
+              MNDevice& device = MNDevice::instance();
+              return metal_native::exp(x, device);
+          },
+          py::arg("input"),
+          "Element-wise exponential");
+
+    m.def("log",
+          [](const MNTensor& x) {
+              MNDevice& device = MNDevice::instance();
+              return metal_native::log(x, device);
+          },
+          py::arg("input"),
+          "Element-wise natural logarithm");
+
+    m.def("sqrt",
+          [](const MNTensor& x) {
+              MNDevice& device = MNDevice::instance();
+              return metal_native::sqrt(x, device);
+          },
+          py::arg("input"),
+          "Element-wise square root");
+
+    m.def("abs",
+          [](const MNTensor& x) {
+              MNDevice& device = MNDevice::instance();
+              return metal_native::abs(x, device);
+          },
+          py::arg("input"),
+          "Element-wise absolute value");
+
+    m.def("neg",
+          [](const MNTensor& x) {
+              MNDevice& device = MNDevice::instance();
+              return metal_native::neg(x, device);
+          },
+          py::arg("input"),
+          "Element-wise negation");
+
+    // ---------------------------------------------------------------------------
+    // Conditional operations
+    // ---------------------------------------------------------------------------
+
+    m.def("clamp",
+          [](const MNTensor& x, float min_val, float max_val) {
+              MNDevice& device = MNDevice::instance();
+              return clamp(x, min_val, max_val, device);
+          },
+          py::arg("input"), py::arg("min"), py::arg("max"),
+          "Clamp values to [min, max] range");
+
+    // ---------------------------------------------------------------------------
+    // Dtype conversion
+    // ---------------------------------------------------------------------------
+
+    m.def("cast_dtype",
+          [](const MNTensor& input, MNDType target_dtype) {
+              MNDevice& device = MNDevice::instance();
+              return cast_dtype(input, target_dtype, device);
+          },
+          py::arg("input"), py::arg("target_dtype"),
+          "Cast tensor to a different dtype");
+
+    // dequant_matmul
+    m.def("dequant_matmul",
+          [](const MNTensor& activations,
+             const MNTensor& weights_packed,
+             const MNTensor& scales,
+             const MNTensor& zeros,
+             uint32_t group_size,
+             const std::string& quant_type_str) {
+              QuantType qt = (quant_type_str == "int4") ? QuantType::INT4 : QuantType::INT8;
+              return dequant_matmul(activations, weights_packed, scales, zeros, group_size, qt);
+          },
+          py::arg("activations"),
+          py::arg("weights_packed"),
+          py::arg("scales"),
+          py::arg("zeros"),
+          py::arg("group_size"),
+          py::arg("quant_type"),
+          "Fused dequantization + matrix multiplication");
 }
 
 } // namespace python

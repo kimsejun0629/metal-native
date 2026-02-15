@@ -124,6 +124,11 @@ public:
     /// Deep-copy this tensor into a new contiguous allocation.
     MNTensor clone() const;
 
+    /// If the tensor's buffer uses Private storage, return a new tensor
+    /// backed by a Shared buffer (via GPU blit copy). If already Shared,
+    /// returns *this (no copy).
+    MNTensor to_shared() const;
+
     /// Fill every element with @p value (interpreted through the tensor's dtype).
     void fill_(double value);
 

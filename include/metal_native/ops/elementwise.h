@@ -96,4 +96,21 @@ MNTensor where(const MNTensor& condition,
                const MNTensor& y,
                MNDevice& device);
 
+// ---------------------------------------------------------------------------
+// Dtype conversion operations
+// ---------------------------------------------------------------------------
+
+/// Cast tensor to a different dtype.
+///
+/// Converts tensor elements to the target dtype using GPU kernels.
+/// Currently supports FP32 ↔ FP16 conversions. If input already has
+/// target dtype, returns the input unchanged.
+///
+/// @param input         Input tensor.
+/// @param target_dtype  Desired output dtype.
+/// @param device        Device to perform the operation on.
+/// @return              Tensor with target dtype.
+/// @throws              MNException if conversion is not supported.
+MNTensor cast_dtype(const MNTensor& input, MNDType target_dtype, MNDevice& device);
+
 } // namespace metal_native

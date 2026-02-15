@@ -1,0 +1,72 @@
+{
+  "label": "test_baseline",
+  "timestamp": "2026-02-14T21:19:26.517789",
+  "git_hash": "9dbf497d72d11ec228f5de7b26a13e000284cd54",
+  "git_branch": "main",
+  "metadata": {
+    "config_file": "benchmarks/regression_config.json",
+    "category_filter": "matmul"
+  },
+  "results": [
+    {
+      "name": "matmul_fp16_decode",
+      "category": "matmul",
+      "median_ms": 0.01672900152718153,
+      "mean_ms": 0.01679469126068937,
+      "std_ms": 0.0008270200846108239,
+      "min_ms": 0.014795174574162764,
+      "max_ms": 0.018760398548610384,
+      "p95_ms": 0.018086619019526937,
+      "p99_ms": 0.018713788542737548,
+      "samples": 198,
+      "timestamp": 1771071566.438024,
+      "git_hash": "9dbf497d72d11ec228f5de7b26a13e000284cd54",
+      "git_branch": "main"
+    },
+    {
+      "name": "matmul_fp16_small",
+      "category": "matmul",
+      "median_ms": 2.1487693428842625,
+      "mean_ms": 2.153759157070162,
+      "std_ms": 0.10850864108417647,
+      "min_ms": 1.8721962233324319,
+      "max_ms": 2.432460916780561,
+      "p95_ms": 2.3446123822811984,
+      "p99_ms": 2.399258618220747,
+      "samples": 199,
+      "timestamp": 1771071566.4596128,
+      "git_hash": "9dbf497d72d11ec228f5de7b26a13e000284cd54",
+      "git_branch": "main"
+    },
+    {
+      "name": "matmul_fp16_medium",
+      "category": "matmul",
+      "median_ms": 8.585774593201661,
+      "mean_ms": 8.599597060866088,
+      "std_ms": 0.3637592578453512,
+      "min_ms": 7.707220317301504,
+      "max_ms": 9.42656485146315,
+      "p95_ms": 9.247775038707074,
+      "p99_ms": 9.381035476873066,
+      "samples": 197,
+      "timestamp": 1771071566.4796002,
+      "git_hash": "9dbf497d72d11ec228f5de7b26a13e000284cd54",
+      "git_branch": "main"
+    },
+    {
+      "name": "matmul_fp16_large",
+      "category": "matmul",
+      "median_ms": 34.154987814967875,
+      "mean_ms": 34.06536066220261,
+      "std_ms": 1.7540080424359827,
+      "min_ms": 29.552324723272015,
+      "max_ms": 38.544978542489105,
+      "p95_ms": 37.273909717787554,
+      "p99_ms": 38.17714701933801,
+      "samples": 199,
+      "timestamp": 1771071566.499369,
+      "git_hash": "9dbf497d72d11ec228f5de7b26a13e000284cd54",
+      "git_branch": "main"
+    }
+  ]
+}

@@ -29,6 +29,8 @@ class CommandPipeline {
 public:
     // Forward declaration for RAII batch scope
     class BatchScope;
+    // Forward declaration for RAII encoder scope
+    class EncoderScope;
     /// Construct a pipeline backed by the given device.
     ///
     /// @param device        The MNDevice that owns the command queue.
@@ -117,6 +119,74 @@ public:
     ///   } // flush happens here automatically
     BatchScope batch_scope();
 
+    // -- Encoder scoping -----------------------------------------------------
+
+    /// Create a RAII encoder scope that keeps a single compute command encoder
+    /// open across multiple operations.
+    ///
+    /// Normally each operation creates its own encoder, encodes, calls endEncoding,
+    /// and commits. This creates a new command buffer for every operation.
+    /// EncoderScope keeps ONE encoder alive across multiple ops, reducing overhead.
+    ///
+    /// On construction, the scope creates/retrieves a compute command encoder.
+    /// On destruction, it ends encoding and calls commit_and_continue().
+    ///
+    /// Usage:
+    ///   {
+    ///       auto scope = pipeline.encoder_scope();
+    ///       // Multiple operations encode into the same encoder
+    ///       op1();  // uses current_encoder()
+    ///       op2();  // uses current_encoder()
+    ///       op3();  // uses current_encoder()
+    ///   } // endEncoding + commit happens here automatically
+    ///
+    /// Smart auto-commit: if too many operations are encoded in one encoder
+    /// (default: 32), the encoder is ended and a new one is created to avoid
+    /// GPU stalls from very long command buffers.
+    EncoderScope encoder_scope();
+
+    /// Create a combined scope for transformer layers: batch + encoder.
+    ///
+    /// This is a convenience method that combines batch_scope() and encoder_scope()
+    /// for maximum batching efficiency in transformer layers.
+    ///
+    /// Usage:
+    ///   {
+    ///       auto scope = pipeline.transformer_layer_scope();
+    ///       // All ops in the layer: lazy commit + single encoder
+    ///       rmsnorm(); qkv_proj(); rope(); attention(); ...
+    ///   } // endEncoding + flush happens here
+    EncoderScope transformer_layer_scope();
+
+#ifdef __OBJC__
+    /// Return the current active encoder if an encoder scope is active,
+    /// otherwise return nil. Operations should check this before creating
+    /// their own encoder.
+    ///
+    /// When an encoder scope is active, operations should use this encoder
+    /// instead of creating a new one from current_buffer().
+    id<MTLComputeCommandEncoder> current_encoder();
+#else
+    /// Opaque handle to the current MTLComputeCommandEncoder (cast in .mm files).
+    void* current_encoder();
+#endif
+
+    /// Check if an encoder scope is currently active.
+    bool has_active_encoder() const noexcept;
+
+    /// Set the maximum number of operations before auto-flushing the encoder
+    /// within an encoder scope (default: 32).
+    /// This also resets the adaptive value to the specified max_ops.
+    /// Values are clamped to [1, 512].
+    void set_encoder_max_ops(size_t max_ops);
+    size_t encoder_max_ops() const noexcept;
+
+    /// Get the current adaptive encoder max ops value (self-tuning).
+    size_t adaptive_encoder_max_ops() const;
+
+    /// Get the current encoder duration EMA in milliseconds (for profiling).
+    double encoder_duration_ema() const;
+
     // -- Operation counting --------------------------------------------------
 
     /// Increment the operation counter. When the count reaches the auto-flush
@@ -164,6 +234,46 @@ public:
 
 private:
     CommandPipeline& pipeline_;
+    bool previous_lazy_state_;
+};
+
+// ---------------------------------------------------------------------------
+// EncoderScope RAII guard
+// ---------------------------------------------------------------------------
+
+/// RAII guard that keeps a single compute command encoder open for the
+/// lifetime of the scope.
+///
+/// On construction, creates a compute command encoder from current_buffer().
+/// On destruction, ends encoding and calls commit_and_continue().
+///
+/// This reduces GPU dispatch overhead by batching consecutive kernel dispatches
+/// into a single command encoder instead of creating/ending an encoder for
+/// each operation.
+///
+/// Nested scopes are supported: inner scopes save/restore the encoder state.
+/// The innermost scope owns the active encoder.
+///
+/// Can be combined with BatchScope for maximum batching efficiency:
+///   {
+///       auto batch = pipeline.batch_scope();      // lazy commit
+///       auto encoder = pipeline.encoder_scope();  // single encoder
+///       // All ops: one encoder, one command buffer
+///   }
+class CommandPipeline::EncoderScope {
+public:
+    explicit EncoderScope(CommandPipeline& pipeline);
+    ~EncoderScope();
+
+    // Non-copyable, non-movable
+    EncoderScope(const EncoderScope&) = delete;
+    EncoderScope& operator=(const EncoderScope&) = delete;
+    EncoderScope(EncoderScope&&) = delete;
+    EncoderScope& operator=(EncoderScope&&) = delete;
+
+private:
+    CommandPipeline& pipeline_;
+    bool previous_encoder_state_;
     bool previous_lazy_state_;
 };
 

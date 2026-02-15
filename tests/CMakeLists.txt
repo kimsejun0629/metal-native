@@ -90,10 +90,16 @@ if(CORE_TEST_SOURCES)
     )
 endif()
 
-# Extended C++ tests (buffer, allocator, kernel_cache) - require Metal frameworks
+# Extended C++ tests (buffer, allocator, kernel_cache, command_pipeline, activation_pool, dequant_matmul, cast, jit_fusion) - require Metal frameworks
 file(GLOB EXTENDED_TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_buffer.cpp"
                                 "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_allocator.cpp"
-                                "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_kernel_cache.cpp")
+                                "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_kernel_cache.cpp"
+                                "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_command_pipeline.mm"
+                                "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_activation_pool.cpp"
+                                "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_phase_pipeline.cpp"
+                                "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_dequant_matmul.mm"
+                                "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_cast.mm"
+                                "${CMAKE_CURRENT_SOURCE_DIR}/cpp/test_jit_fusion.mm")
 if(EXTENDED_TEST_SOURCES)
     add_executable(metal_native_extended_tests ${EXTENDED_TEST_SOURCES})
     target_link_libraries(metal_native_extended_tests
@@ -102,6 +108,15 @@ if(EXTENDED_TEST_SOURCES)
             metal_native_kernels
             metal_native_memory
             metal_native_dispatch
+            metal_native_inference
+            metal_native_ops
+            metal_native_graph
+            MPSGraph::MPSGraph
+            Metal::Metal
+            "-framework Foundation"
+            "-framework Accelerate"
+            "-framework MetalPerformanceShaders"
+            "-framework MetalPerformanceShadersGraph"
             GTest::gtest_main
     )
     apply_apple_silicon_flags(metal_native_extended_tests)

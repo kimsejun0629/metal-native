@@ -40,15 +40,33 @@ except ImportError as e:
     print(f"[MetalNative] Not available: {e}")
 
 def to_mn(t):
-    """Convert PyTorch MPS tensor to MNTensor (zero-copy)."""
+    """Convert PyTorch MPS tensor to MNTensor.
+
+    Attempts zero-copy wrapping first.  Falls back to direct buffer
+    target (single GPU blit copy) when the MPS data pointer is not
+    CPU-accessible (common for large tensors with GPU-only memory).
+    """
     if not t.is_contiguous():
         t = t.contiguous()
     dtype_map = {torch.float32: 'float32', torch.float16: 'float16'}
-    return _C.tensor_from_mps_ptr(
-        t.data_ptr(), t.untyped_storage().nbytes(),
-        list(t.shape), list(t.stride()),
-        dtype_map[t.dtype]
-    )
+    try:
+        return _C.tensor_from_mps_ptr(
+            t.data_ptr(), t.untyped_storage().nbytes(),
+            list(t.shape), list(t.stride()),
+            dtype_map[t.dtype]
+        )
+    except Exception:
+        # Direct buffer target: allocate Metal buffer, then have PyTorch
+        # blit MPS data directly into it (single copy, no intermediate).
+        import ctypes
+        dtype_str = dtype_map[t.dtype]
+        np_dtype_map = {torch.float32: np.float32, torch.float16: np.float16}
+        data_ptr, mn_tensor = _C.allocate_tensor_for_copy(list(t.shape), dtype_str)
+        buf = (ctypes.c_char * t.nbytes).from_address(data_ptr)
+        arr = np.frombuffer(buf, dtype=np_dtype_map[t.dtype]).reshape(t.shape)
+        buf_view = torch.from_numpy(arr)
+        buf_view.copy_(t)  # PyTorch MPS→CPU blit directly into our Metal buffer
+        return mn_tensor
 
 def sync_mn():
     """Synchronize MetalNative command queue."""

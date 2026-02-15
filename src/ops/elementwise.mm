@@ -357,4 +357,62 @@ MNTensor where(const MNTensor& condition,
     return output;
 }
 
+// ---------------------------------------------------------------------------
+// Dtype conversion operations
+// ---------------------------------------------------------------------------
+
+MNTensor cast_dtype(const MNTensor& input, MNDType target_dtype, MNDevice& device) {
+    // No-op if already target dtype
+    if (input.dtype() == target_dtype) {
+        return input;
+    }
+
+    MN_CHECK(input.is_contiguous(),
+             MetalNativeError::InvalidArgument,
+             "cast_dtype: input must be contiguous");
+
+    // Check supported conversions
+    const bool is_fp32_to_fp16 = (input.dtype() == MNDType::Float32 && target_dtype == MNDType::Float16);
+    const bool is_fp16_to_fp32 = (input.dtype() == MNDType::Float16 && target_dtype == MNDType::Float32);
+
+    MN_CHECK(is_fp32_to_fp16 || is_fp16_to_fp32,
+             MetalNativeError::InvalidArgument,
+             "cast_dtype: only FP32 ↔ FP16 conversions are currently supported");
+
+    // Use same storage mode as input to avoid unnecessary copies
+    StorageMode out_mode = input.buffer()->storage_mode();
+    MNTensor output = MNTensor::empty(input.shape(), target_dtype, device, out_mode);
+    const int64_t numel = input.numel();
+
+    @autoreleasepool {
+        CommandPipeline& cmd_pipeline = device.command_pipeline();
+
+        const char* kernel_name = is_fp32_to_fp16 ? "cast_fp32_to_fp16" : "cast_fp16_to_fp32";
+        id<MTLComputePipelineState> pipeline = KernelRegistry::instance().get_pipeline(kernel_name);
+
+        id<MTLCommandBuffer> command_buffer = cmd_pipeline.current_buffer();
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:pipeline];
+        [encoder setBuffer:input.buffer()->metal_buffer() offset:input.offset() atIndex:0];
+        [encoder setBuffer:output.buffer()->metal_buffer() offset:output.offset() atIndex:1];
+
+        MN_CHECK(numel <= UINT32_MAX, MetalNativeError::InvalidArgument, "cast_dtype: dimension exceeds uint32_t range");
+        uint32_t count = static_cast<uint32_t>(numel);
+        [encoder setBytes:&count length:sizeof(uint32_t) atIndex:2];
+
+        // Dispatch threads: kernel processes 4 elements per thread
+        MTLSize grid_size = MTLSizeMake((numel + 3) / 4, 1, 1);
+        MTLSize threadgroup_size = MTLSizeMake(
+            std::min<NSUInteger>(256, pipeline.maxTotalThreadsPerThreadgroup), 1, 1);
+
+        [encoder dispatchThreads:grid_size threadsPerThreadgroup:threadgroup_size];
+        [encoder endEncoding];
+
+        cmd_pipeline.commit_and_continue();
+    }
+
+    return output;
+}
+
 } // namespace metal_native

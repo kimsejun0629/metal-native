@@ -8,6 +8,7 @@
 /// for smaller matrices. Supports transposition flags and multiple data types.
 
 #include <cstddef>
+#include <cstdint>
 
 namespace metal_native {
 
@@ -54,5 +55,30 @@ MNTensor batched_matmul(const MNTensor& a,
                         const MNTensor& b,
                         bool transpose_a = false,
                         bool transpose_b = false);
+
+/// Quantization type for dequant_matmul
+enum class QuantType {
+    INT4,  ///< 4-bit integer quantization
+    INT8   ///< 8-bit integer quantization
+};
+
+/// Fused dequantization + matrix multiplication.
+///
+/// Reads quantized weights (INT4 or INT8), dequantizes on-the-fly in shared
+/// memory during matmul, eliminating the intermediate FP16 buffer.
+///
+/// @param activations  FP16 activation tensor [M, K]
+/// @param weights_packed  Packed weight tensor [N, K/2] for INT4 or [N, K] for INT8
+/// @param scales  Scale factors [N, K/group_size]
+/// @param zeros   Zero points [N, K/group_size]
+/// @param group_size  Quantization group size (32, 64, or 128)
+/// @param quant_type  INT4 or INT8
+/// @return Result tensor [M, N] in FP16
+MNTensor dequant_matmul(const MNTensor& activations,
+                         const MNTensor& weights_packed,
+                         const MNTensor& scales,
+                         const MNTensor& zeros,
+                         uint32_t group_size,
+                         QuantType quant_type);
 
 } // namespace metal_native

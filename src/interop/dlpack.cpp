@@ -211,14 +211,17 @@ MNTensor DLPackImporter::from_dlpack(DLManagedTensor* dl_tensor) {
         }
 
         // Wrap external pointer as MNBuffer (zero-copy)
+        size_t alignment_offset = 0;
         auto buffer = MNBuffer::wrap_external(
             MNDevice::instance(),
             data,
-            total_bytes
+            total_bytes,
+            nullptr,
+            &alignment_offset
         );
 
         // Construct and return MNTensor
-        return MNTensor(buffer, shape, strides, dtype, 0);
+        return MNTensor(buffer, shape, strides, dtype, alignment_offset);
     } else if (dl.device.device_type == kDLCPU ||
                dl.device.device_type == kDLCUDAHost) {
         // Copy from CPU memory to GPU

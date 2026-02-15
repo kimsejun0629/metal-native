@@ -21,8 +21,12 @@ namespace metal_native {
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Minimum allocation size (one GPU page).
-static constexpr size_t kMinAllocSize = 16384; // 16 KB
+/// Minimum allocation size.
+/// Set to 64 bytes to support fine-grained size classes for small allocations.
+/// The size class system uses power-of-2 with 1.5x intermediates, so this allows
+/// distinct buckets for 64, 96, 128, 192, 256, ... up to larger allocations.
+/// This is critical for proper cache hit/miss behavior in the allocator.
+static constexpr size_t kMinAllocSize = 64; // 64 bytes
 
 // ---------------------------------------------------------------------------
 // Helpers

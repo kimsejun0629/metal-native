@@ -18,9 +18,16 @@
 #include <metal_native/core/error.h>
 #include <metal_native/core/device.h>
 #include <metal_native/core/tensor.h>
+#include <metal_native/core/buffer.h>
+#include <metal_native/core/shape.h>
 #include <metal_native/future/fast_ops.h>
 #include <metal_native/kernels/kernel_registry.h>
 #include <metal_native/dispatch/command_pipeline.h>
+#include <metal_native/memory/allocator.h>
+#include <metal_native/ops/elementwise.h>
+#include <metal_native/ops/matmul.h>
+
+#include <cstring>
 
 namespace py = pybind11;
 using namespace metal_native;
@@ -118,7 +125,23 @@ PYBIND11_MODULE(_C, m) {
         .def("is_contiguous", &MNTensor::is_contiguous)
         .def("__repr__", [](const MNTensor& t) {
             return t.to_string();
-        });
+        })
+        .def("reshape", [](const MNTensor& t, py::list new_shape_list) {
+            std::vector<int64_t> dims;
+            dims.reserve(new_shape_list.size());
+            for (auto item : new_shape_list) {
+                dims.push_back(item.cast<int64_t>());
+            }
+            MNShape new_shape(dims);
+            return std::make_shared<MNTensor>(t.reshape(new_shape));
+        }, py::arg("new_shape"), "Reshape tensor (returns a view)")
+        .def("slice", [](const MNTensor& t, int64_t dim, int64_t start, int64_t end) {
+            return std::make_shared<MNTensor>(t.slice(dim, start, end));
+        }, py::arg("dim"), py::arg("start"), py::arg("end") = -1,
+           "Slice tensor along a dimension (returns a view)")
+        .def("clone", [](const MNTensor& t) {
+            return std::make_shared<MNTensor>(t.clone());
+        }, "Deep-copy tensor into new contiguous allocation");
 
     // ---------------------------------------------------------------------------
     // QKVResult Struct
@@ -393,22 +416,84 @@ bool lazy_commit() {
     return MNDevice::instance().command_pipeline().lazy_commit();
 }
 
+// ---------------------------------------------------------------------------
+// Helper: parse dtype string to MNDType enum
+// ---------------------------------------------------------------------------
+static MNDType parse_dtype_str(const std::string& dtype_str) {
+    if (dtype_str == "float32") return MNDType::Float32;
+    if (dtype_str == "float16") return MNDType::Float16;
+    if (dtype_str == "bfloat16") return MNDType::BFloat16;
+    if (dtype_str == "int64") return MNDType::Int64;
+    if (dtype_str == "int32") return MNDType::Int32;
+    if (dtype_str == "int16") return MNDType::Int16;
+    if (dtype_str == "int8") return MNDType::Int8;
+    if (dtype_str == "uint8") return MNDType::UInt8;
+    if (dtype_str == "bool") return MNDType::Bool;
+    MN_THROW(MetalNativeError::InvalidArgument,
+             "Unsupported dtype string: " + dtype_str);
+}
+
+// ---------------------------------------------------------------------------
+// Helper: extract int64_t dims from py::tuple
+// ---------------------------------------------------------------------------
+static std::vector<int64_t> tuple_to_dims(py::tuple shape) {
+    std::vector<int64_t> dims;
+    dims.reserve(shape.size());
+    for (auto item : shape) {
+        dims.push_back(item.cast<int64_t>());
+    }
+    return dims;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: map MNDType to numpy format string
+// ---------------------------------------------------------------------------
+static std::string dtype_to_numpy_format(MNDType dtype) {
+    switch (dtype) {
+        case MNDType::Float32:  return "f";
+        case MNDType::Float16:  return "e";
+        case MNDType::BFloat16: return "e";  // numpy has no bfloat16; approximate as float16
+        case MNDType::Int64:    return "q";
+        case MNDType::Int32:    return "i";
+        case MNDType::Int16:    return "h";
+        case MNDType::Int8:     return "b";
+        case MNDType::UInt8:    return "B";
+        case MNDType::Bool:     return "?";
+        default: MN_THROW(MetalNativeError::InvalidArgument, "dtype_to_numpy_format: unsupported dtype");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: create a scalar tensor filled with a value, matching a given dtype
+// ---------------------------------------------------------------------------
+static std::shared_ptr<MNTensor> make_scalar_tensor(double value, MNDType dtype, MNDevice& device) {
+    auto t = std::make_shared<MNTensor>(MNTensor::empty(MNShape({1}), dtype, device));
+    t->fill_(value);
+    return t;
+}
+
+// Static RNG seed storage
+static int64_t g_rng_seed = 0;
+
+// ---------------------------------------------------------------------------
+// Memory management
+// ---------------------------------------------------------------------------
+
 void empty_cache() {
-    // TODO: Free cached allocations
+    MNDevice::instance().allocator().empty_cache();
 }
 
 size_t memory_allocated() {
-    // TODO: Return current GPU memory usage
-    return 0;
+    return MNDevice::instance().allocator().stats().allocated_bytes;
 }
 
 size_t max_memory_allocated() {
-    // TODO: Return peak GPU memory usage
-    return 0;
+    return MNDevice::instance().allocator().stats().peak_bytes;
 }
 
 void reset_peak_stats() {
-    // TODO: Reset peak memory tracking
+    // AllocatorStats has no reset method; empty cache is the closest operation
+    MNDevice::instance().allocator().empty_cache();
 }
 
 void set_prefer_private_storage(bool enable) {
@@ -419,82 +504,242 @@ bool prefer_private_storage() {
     return MNDevice::instance().prefer_private_storage();
 }
 
+// ---------------------------------------------------------------------------
+// Random number generation
+// ---------------------------------------------------------------------------
+
 void set_seed(int64_t seed) {
-    // TODO: Set RNG seed
+    g_rng_seed = seed;
 }
 
-// Tensor operation stubs - these will throw until Tensor is implemented
+// ---------------------------------------------------------------------------
+// Tensor construction
+// ---------------------------------------------------------------------------
+
 py::object tensor_from_numpy(py::array array, const std::string& dtype_name, bool requires_grad) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
+    MNDType dtype = parse_dtype_str(dtype_name);
+    MNDevice& device = MNDevice::instance();
+
+    py::buffer_info info = array.request();
+    size_t nbytes = static_cast<size_t>(info.size) * dtype_size(dtype);
+
+    std::vector<int64_t> shape_vec;
+    shape_vec.reserve(info.shape.size());
+    for (auto dim : info.shape) {
+        shape_vec.push_back(static_cast<int64_t>(dim));
+    }
+
+    auto buf = std::make_shared<MNBuffer>(device, nbytes, StorageMode::Shared);
+    std::memcpy(buf->data(), info.ptr, nbytes);
+
+    MNShape mn_shape(std::move(shape_vec));
+    auto strides = mn_shape.contiguous_strides();
+    auto tensor = std::make_shared<MNTensor>(buf, mn_shape, std::move(strides), dtype, 0);
+    return py::cast(tensor);
 }
 
 py::object tensor_empty(py::tuple shape, const std::string& dtype_name, bool requires_grad) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
+    MNDType dtype = parse_dtype_str(dtype_name);
+    MNDevice& device = MNDevice::instance();
+    MNShape mn_shape(tuple_to_dims(shape));
+    auto tensor = std::make_shared<MNTensor>(MNTensor::empty(mn_shape, dtype, device));
+    return py::cast(tensor);
 }
 
 py::object tensor_zeros(py::tuple shape, const std::string& dtype_name, bool requires_grad) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
+    MNDType dtype = parse_dtype_str(dtype_name);
+    MNDevice& device = MNDevice::instance();
+    MNShape mn_shape(tuple_to_dims(shape));
+    auto tensor = std::make_shared<MNTensor>(MNTensor::zeros(mn_shape, dtype, device));
+    return py::cast(tensor);
 }
 
 py::object tensor_ones(py::tuple shape, const std::string& dtype_name, bool requires_grad) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
+    MNDType dtype = parse_dtype_str(dtype_name);
+    MNDevice& device = MNDevice::instance();
+    MNShape mn_shape(tuple_to_dims(shape));
+    auto tensor = std::make_shared<MNTensor>(MNTensor::ones(mn_shape, dtype, device));
+    return py::cast(tensor);
 }
 
+// ---------------------------------------------------------------------------
+// Tensor queries
+// ---------------------------------------------------------------------------
+
 py::tuple tensor_shape(py::object handle) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
+    auto t = handle.cast<std::shared_ptr<MNTensor>>();
+    py::tuple result(t->ndim());
+    for (size_t i = 0; i < t->ndim(); ++i) {
+        result[i] = t->shape()[static_cast<int64_t>(i)];
+    }
+    return result;
 }
 
 std::string tensor_dtype(py::object handle) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
+    auto t = handle.cast<std::shared_ptr<MNTensor>>();
+    return dtype_name(t->dtype());
 }
 
 py::array tensor_to_numpy(py::object handle) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
+    auto t = handle.cast<std::shared_ptr<MNTensor>>();
+    auto& device = MNDevice::instance();
+    device.synchronize();
+
+    // If Private storage, convert to Shared first
+    std::shared_ptr<MNTensor> readable_t = t;
+    py::object base = handle;
+    if (t->buffer()->storage_mode() == StorageMode::Private) {
+        readable_t = std::make_shared<MNTensor>(t->to_shared());
+        base = py::cast(readable_t);
+    }
+
+    size_t elem_size = dtype_size(readable_t->dtype());
+    std::string fmt = dtype_to_numpy_format(readable_t->dtype());
+
+    std::vector<ssize_t> shape;
+    std::vector<ssize_t> strides_bytes;
+    shape.reserve(readable_t->ndim());
+    strides_bytes.reserve(readable_t->ndim());
+    for (size_t i = 0; i < readable_t->ndim(); ++i) {
+        shape.push_back(static_cast<ssize_t>(readable_t->shape()[static_cast<int64_t>(i)]));
+        strides_bytes.push_back(static_cast<ssize_t>(readable_t->strides()[i]) * static_cast<ssize_t>(elem_size));
+    }
+
+    return py::array(py::dtype(fmt), shape, strides_bytes, readable_t->raw_data(), base);
 }
 
 py::object tensor_item(py::object handle) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
+    auto t = handle.cast<std::shared_ptr<MNTensor>>();
+    MN_CHECK(t->numel() == 1, MetalNativeError::InvalidArgument,
+             "tensor_item: tensor must have exactly 1 element");
+    MNDevice::instance().synchronize();
+
+    switch (t->dtype()) {
+        case MNDType::Float32:
+            return py::cast(*t->data_ptr<float>());
+        case MNDType::Float16:
+            // FP16 stored as uint16_t; use __fp16 on ARM or cast via float
+            return py::cast(static_cast<float>(*reinterpret_cast<const __fp16*>(t->raw_data())));
+        case MNDType::BFloat16: {
+            // BFloat16: upper 16 bits of a float32
+            uint16_t bits = *t->data_ptr<uint16_t>();
+            uint32_t f32_bits = static_cast<uint32_t>(bits) << 16;
+            float val;
+            std::memcpy(&val, &f32_bits, sizeof(val));
+            return py::cast(val);
+        }
+        case MNDType::Int64:
+            return py::cast(*t->data_ptr<int64_t>());
+        case MNDType::Int32:
+            return py::cast(*t->data_ptr<int32_t>());
+        case MNDType::Int16:
+            return py::cast(*t->data_ptr<int16_t>());
+        case MNDType::Int8:
+            return py::cast(*t->data_ptr<int8_t>());
+        case MNDType::UInt8:
+            return py::cast(*t->data_ptr<uint8_t>());
+        case MNDType::Bool:
+            return py::cast(static_cast<bool>(*t->data_ptr<uint8_t>()));
+        default:
+            MN_THROW(MetalNativeError::InvalidArgument, "tensor_item: unsupported dtype");
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Tensor-tensor arithmetic
+// ---------------------------------------------------------------------------
 
 py::object tensor_add(py::object lhs, py::object rhs) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
-}
-
-py::object tensor_add_scalar(py::object tensor, double scalar) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
+    auto a = lhs.cast<std::shared_ptr<MNTensor>>();
+    auto b = rhs.cast<std::shared_ptr<MNTensor>>();
+    MNDevice& device = MNDevice::instance();
+    auto result = std::make_shared<MNTensor>(metal_native::add(*a, *b, device));
+    return py::cast(result);
 }
 
 py::object tensor_sub(py::object lhs, py::object rhs) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
-}
-
-py::object tensor_sub_scalar(py::object tensor, double scalar) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
-}
-
-py::object tensor_rsub_scalar(py::object tensor, double scalar) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
+    auto a = lhs.cast<std::shared_ptr<MNTensor>>();
+    auto b = rhs.cast<std::shared_ptr<MNTensor>>();
+    MNDevice& device = MNDevice::instance();
+    auto result = std::make_shared<MNTensor>(metal_native::sub(*a, *b, device));
+    return py::cast(result);
 }
 
 py::object tensor_mul(py::object lhs, py::object rhs) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
-}
-
-py::object tensor_mul_scalar(py::object tensor, double scalar) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
+    auto a = lhs.cast<std::shared_ptr<MNTensor>>();
+    auto b = rhs.cast<std::shared_ptr<MNTensor>>();
+    MNDevice& device = MNDevice::instance();
+    auto result = std::make_shared<MNTensor>(metal_native::mul(*a, *b, device));
+    return py::cast(result);
 }
 
 py::object tensor_div(py::object lhs, py::object rhs) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
+    auto a = lhs.cast<std::shared_ptr<MNTensor>>();
+    auto b = rhs.cast<std::shared_ptr<MNTensor>>();
+    MNDevice& device = MNDevice::instance();
+    auto result = std::make_shared<MNTensor>(metal_native::div(*a, *b, device));
+    return py::cast(result);
+}
+
+// ---------------------------------------------------------------------------
+// Tensor-scalar arithmetic
+// ---------------------------------------------------------------------------
+
+py::object tensor_add_scalar(py::object tensor, double scalar) {
+    auto t = tensor.cast<std::shared_ptr<MNTensor>>();
+    MNDevice& device = MNDevice::instance();
+    auto scalar_t = make_scalar_tensor(scalar, t->dtype(), device);
+    auto result = std::make_shared<MNTensor>(metal_native::add(*t, *scalar_t, device));
+    return py::cast(result);
+}
+
+py::object tensor_sub_scalar(py::object tensor, double scalar) {
+    auto t = tensor.cast<std::shared_ptr<MNTensor>>();
+    MNDevice& device = MNDevice::instance();
+    auto scalar_t = make_scalar_tensor(scalar, t->dtype(), device);
+    auto result = std::make_shared<MNTensor>(metal_native::sub(*t, *scalar_t, device));
+    return py::cast(result);
+}
+
+py::object tensor_rsub_scalar(py::object tensor, double scalar) {
+    auto t = tensor.cast<std::shared_ptr<MNTensor>>();
+    MNDevice& device = MNDevice::instance();
+    auto scalar_t = make_scalar_tensor(scalar, t->dtype(), device);
+    // rsub: scalar - tensor
+    auto result = std::make_shared<MNTensor>(metal_native::sub(*scalar_t, *t, device));
+    return py::cast(result);
+}
+
+py::object tensor_mul_scalar(py::object tensor, double scalar) {
+    auto t = tensor.cast<std::shared_ptr<MNTensor>>();
+    MNDevice& device = MNDevice::instance();
+    auto scalar_t = make_scalar_tensor(scalar, t->dtype(), device);
+    auto result = std::make_shared<MNTensor>(metal_native::mul(*t, *scalar_t, device));
+    return py::cast(result);
 }
 
 py::object tensor_div_scalar(py::object tensor, double scalar) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
+    auto t = tensor.cast<std::shared_ptr<MNTensor>>();
+    MNDevice& device = MNDevice::instance();
+    auto scalar_t = make_scalar_tensor(scalar, t->dtype(), device);
+    auto result = std::make_shared<MNTensor>(metal_native::div(*t, *scalar_t, device));
+    return py::cast(result);
 }
 
+// ---------------------------------------------------------------------------
+// Matrix multiplication
+// ---------------------------------------------------------------------------
+
 py::object tensor_matmul(py::object lhs, py::object rhs) {
-    throw std::runtime_error("Tensor operations not yet implemented (Phase 1)");
+    auto a = lhs.cast<std::shared_ptr<MNTensor>>();
+    auto b = rhs.cast<std::shared_ptr<MNTensor>>();
+    auto result = std::make_shared<MNTensor>(metal_native::matmul(*a, *b));
+    return py::cast(result);
 }
+
+// ---------------------------------------------------------------------------
+// DLPack interop (Phase 3 - keep as stubs)
+// ---------------------------------------------------------------------------
 
 py::object tensor_to_dlpack(py::object handle) {
     throw std::runtime_error("DLPack interop not yet implemented (Phase 3)");

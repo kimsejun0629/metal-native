@@ -1,0 +1,105 @@
+{
+  "generated_at": "2026-02-14T21:21:06.575894",
+  "current": {
+    "git_hash": "9dbf497d72d11ec228f5de7b26a13e000284cd54",
+    "git_branch": "main",
+    "timestamp": 1771071666.575849
+  },
+  "baseline": {
+    "label": "all_ops",
+    "git_hash": "9dbf497d72d11ec228f5de7b26a13e000284cd54",
+    "git_branch": "main",
+    "timestamp": "2026-02-14T21:19:43.224848"
+  },
+  "summary": {
+    "total": 9,
+    "stable": 9,
+    "improvements": 0,
+    "regressions": 0
+  },
+  "regressions": [],
+  "improvements": [],
+  "all_results": [
+    {
+      "name": "matmul_fp16_decode",
+      "category": "matmul",
+      "current_ms": 0.016814463805797174,
+      "baseline_ms": 0.016823930671300686,
+      "ratio": 0.999437297639388,
+      "change_pct": -0.05627023606119552,
+      "status": "STABLE"
+    },
+    {
+      "name": "matmul_fp16_small",
+      "category": "matmul",
+      "current_ms": 2.157316370493181,
+      "baseline_ms": 2.137307241163175,
+      "ratio": 1.0093618404245503,
+      "change_pct": 0.936184042455035,
+      "status": "STABLE"
+    },
+    {
+      "name": "matmul_fp16_medium",
+      "category": "matmul",
+      "current_ms": 8.630530817813703,
+      "baseline_ms": 8.605301832844399,
+      "ratio": 1.0029317954743913,
+      "change_pct": 0.29317954743912633,
+      "status": "STABLE"
+    },
+    {
+      "name": "matmul_fp16_large",
+      "category": "matmul",
+      "current_ms": 34.48052113788054,
+      "baseline_ms": 34.32575428442499,
+      "ratio": 1.0045087677367013,
+      "change_pct": 0.450876773670128,
+      "status": "STABLE"
+    },
+    {
+      "name": "attention_fp16_short",
+      "category": "attention",
+      "current_ms": 0.0666322809513229,
+      "baseline_ms": 0.06763178548463203,
+      "ratio": 0.9852213788805524,
+      "change_pct": -1.477862111944761,
+      "status": "STABLE"
+    },
+    {
+      "name": "attention_fp16_medium",
+      "category": "attention",
+      "current_ms": 1.080819755302223,
+      "baseline_ms": 1.0642849235202638,
+      "ratio": 1.0155360950968544,
+      "change_pct": 1.5536095096854385,
+      "status": "STABLE"
+    },
+    {
+      "name": "softmax_fp16_small",
+      "category": "softmax",
+      "current_ms": 0.0013159299683374406,
+      "baseline_ms": 0.0013120009739087618,
+      "ratio": 1.0029946581647522,
+      "change_pct": 0.2994658164752195,
+      "status": "STABLE"
+    },
+    {
+      "name": "rmsnorm_fp16",
+      "category": "normalization",
+      "current_ms": 0.021010542589005247,
+      "baseline_ms": 0.02106705707918693,
+      "ratio": 0.9973173998641929,
+      "change_pct": -0.2682600135807123,
+      "status": "STABLE"
+    },
+    {
+      "name": "swiglu_fp16",
+      "category": "activation",
+      "current_ms": 0.021033458685956033,
+      "baseline_ms": 0.02088787236699863,
+      "ratio": 1.0069698970004919,
+      "change_pct": 0.6969897000491887,
+      "status": "STABLE"
+    }
+  ]
+}

@@ -72,14 +72,49 @@ def from_torch(tensor: 'torch.Tensor', requires_grad: Optional[bool] = None) -> 
             # Fall back to string conversion for unknown types
             dtype_str = str(tensor.dtype).replace('torch.', '')
 
-        handle = _C.tensor_from_mps_ptr(
-            tensor.data_ptr(),
-            tensor.storage().nbytes(),
-            list(tensor.shape),
-            list(tensor.stride()),
-            dtype_str,
-        )
-        return Tensor(_native_handle=handle, requires_grad=requires_grad)
+        try:
+            handle = _C.tensor_from_mps_ptr(
+                tensor.data_ptr(),
+                tensor.storage().nbytes(),
+                list(tensor.shape),
+                list(tensor.stride()),
+                dtype_str,
+            )
+            return Tensor(_native_handle=handle, requires_grad=requires_grad)
+        except Exception:
+            # Direct buffer target: allocate Metal buffer, then have PyTorch
+            # blit MPS data directly into it (single copy, no intermediate).
+            import ctypes
+            np_dtype_map = {
+                torch.float32: np.float32,
+                torch.float16: np.float16,
+                torch.bfloat16: np.float32,  # bfloat16 not in numpy; cast via float32
+                torch.int64: np.int64,
+                torch.int32: np.int32,
+                torch.int16: np.int16,
+                torch.int8: np.int8,
+                torch.uint8: np.uint8,
+                torch.bool: np.bool_,
+            }
+            np_dt = np_dtype_map.get(tensor.dtype)
+            if np_dt is not None and tensor.dtype != torch.bfloat16:
+                data_ptr, mn_handle = _C.allocate_tensor_for_copy(
+                    list(tensor.shape), dtype_str)
+                buf = (ctypes.c_char * tensor.nbytes).from_address(data_ptr)
+                arr = np.frombuffer(buf, dtype=np_dt).reshape(tensor.shape)
+                buf_view = torch.from_numpy(arr)
+                buf_view.copy_(tensor)  # MPS→CPU blit into our Metal buffer
+                return Tensor(_native_handle=mn_handle, requires_grad=requires_grad)
+            else:
+                # Fallback for dtypes without numpy equivalent (e.g. bfloat16)
+                tensor = tensor.cpu().contiguous()
+                handle = _C.tensor_from_cpu_data(
+                    tensor.data_ptr(),
+                    tensor.storage().nbytes(),
+                    list(tensor.shape),
+                    dtype_str,
+                )
+                return Tensor(_native_handle=handle, requires_grad=requires_grad)
 
     # Move to CPU if needed for UMA shared memory (for CUDA/other GPUs)
     if tensor.device.type != 'cpu':

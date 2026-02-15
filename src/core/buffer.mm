@@ -3,6 +3,7 @@
 
 #import <Metal/Metal.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 
 #include "metal_native/core/buffer.h"
 #include "metal_native/core/device.h"
@@ -190,6 +191,55 @@ std::shared_ptr<MNBuffer> MNBuffer::allocate_pooled(
 }
 
 // ---------------------------------------------------------------------------
+// Memory accessibility check (Mach VM region API)
+// ---------------------------------------------------------------------------
+
+/// Check whether [start, start+length) lies entirely within CPU-readable
+/// VM regions.  Walks the VM map using mach_vm_region to verify every
+/// page in the range has VM_PROT_READ.  This avoids SIGBUS when MPS
+/// data_ptr() points to GPU-only IOSurface memory that is not mapped
+/// into the CPU address space.
+static bool is_range_cpu_readable(uintptr_t start, size_t length) {
+    if (length == 0) return true;
+    uintptr_t end = start + length;
+    uintptr_t cursor = start;
+
+    while (cursor < end) {
+        mach_vm_address_t region_addr = static_cast<mach_vm_address_t>(cursor);
+        mach_vm_size_t region_size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object_name = MACH_PORT_NULL;
+
+        kern_return_t kr = mach_vm_region(
+            mach_task_self(),
+            &region_addr,
+            &region_size,
+            VM_REGION_BASIC_INFO_64,
+            reinterpret_cast<vm_region_info_t>(&info),
+            &info_count,
+            &object_name);
+
+        if (kr != KERN_SUCCESS) return false;
+
+        // mach_vm_region returns the region AT or AFTER the query address.
+        // If the returned region starts after our cursor there is an
+        // unmapped gap -- the range is not fully readable.
+        if (region_addr > static_cast<mach_vm_address_t>(cursor))
+            return false;
+
+        // Region must be CPU-readable.
+        if (!(info.protection & VM_PROT_READ))
+            return false;
+
+        // Advance past this region.
+        cursor = static_cast<uintptr_t>(region_addr + region_size);
+    }
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // wrap_external
 // ---------------------------------------------------------------------------
 
@@ -197,7 +247,8 @@ std::shared_ptr<MNBuffer> MNBuffer::wrap_external(
     MNDevice& device,
     void* data_ptr,
     size_t size,
-    std::function<void()> release_callback) {
+    std::function<void()> release_callback,
+    size_t* out_offset) {
 
     MN_CHECK(data_ptr != nullptr,
              MetalNativeError::InvalidArgument,
@@ -209,72 +260,63 @@ std::shared_ptr<MNBuffer> MNBuffer::wrap_external(
 
     constexpr size_t kGPUPageSize = 16384; // 16 KB on Apple Silicon
 
+    uintptr_t ptr_addr = reinterpret_cast<uintptr_t>(data_ptr);
+
+    // Page-align the pointer DOWN for newBufferWithBytesNoCopy.
+    uintptr_t aligned_addr = ptr_addr & ~(kGPUPageSize - 1);
+    size_t alignment_offset = ptr_addr - aligned_addr;
+    void* aligned_ptr = reinterpret_cast<void*>(aligned_addr);
+
+    // Total length must cover from aligned base through end of data,
+    // rounded up to page boundary.
+    size_t total_length = (size + alignment_offset + kGPUPageSize - 1)
+                          & ~(kGPUPageSize - 1);
+
+    // Verify the entire page-aligned range is CPU-readable before
+    // calling newBufferWithBytesNoCopy.  MPS data_ptr() for large
+    // tensors often points to GPU-only IOSurface memory where only a
+    // small prefix (~4 MB) is CPU-mapped.  Accessing beyond that
+    // causes SIGBUS / KERN_PROTECTION_FAILURE.
+    if (!is_range_cpu_readable(aligned_addr, total_length)) {
+        char hex[32];
+        snprintf(hex, sizeof(hex), "0x%lx", (unsigned long)ptr_addr);
+        MN_THROW(MetalNativeError::AllocationFailed,
+                 std::string("wrap_external: memory range at ") + hex +
+                 " (size=" + std::to_string(size) +
+                 " bytes, aligned_length=" + std::to_string(total_length) +
+                 ") is not fully CPU-accessible. "
+                 "This typically happens with large MPS tensors whose backing "
+                 "memory is GPU-only. Use tensor_from_cpu_data() with "
+                 "t.cpu() as a fallback.");
+    }
+
     auto buf = std::shared_ptr<MNBuffer>(new MNBuffer());
     buf->impl_ = std::make_unique<Impl>();
 
-    uintptr_t ptr_addr = reinterpret_cast<uintptr_t>(data_ptr);
-    bool ptr_aligned = (ptr_addr % kGPUPageSize) == 0;
+    buf->impl_->buffer = [device.metal_device()
+        newBufferWithBytesNoCopy:aligned_ptr
+                          length:total_length
+                         options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked
+                     deallocator:nil];
 
-    // Round size up to page boundary for newBufferWithBytesNoCopy.
-    size_t aligned_size = (size + kGPUPageSize - 1) & ~(kGPUPageSize - 1);
-
-    // Try zero-copy first if the pointer is page-aligned.
-    if (ptr_aligned) {
-        buf->impl_->buffer = [device.metal_device()
-            newBufferWithBytesNoCopy:data_ptr
-                              length:aligned_size
-                             options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked
-                         deallocator:nil];
-    }
-
-    if (buf->impl_->buffer == nil) {
-        // Fallback: allocate a new buffer and memcpy data.
-        // This handles non-page-aligned pointers (e.g. PyTorch MPS weight
-        // tensors whose data_ptr is offset within a shared storage).
-        // NOTE: MPS data_ptr() can SIGBUS during large memcpy. Callers
-        // should prefer passing CPU-accessible pointers for large buffers.
-        buf->impl_->buffer = [device.metal_device()
-            newBufferWithLength:size
-                        options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked];
-
-        MN_CHECK(buf->impl_->buffer != nil,
-                 MetalNativeError::AllocationFailed,
-                 "wrap_external: buffer allocation failed (size=" +
-                 std::to_string(size) + " bytes)");
-
-        // Probe the source memory before bulk copy to avoid SIGBUS from
-        // non-CPU-accessible GPU pointers (e.g., large MPS data_ptr()).
-        {
-            vm_size_t probe_size = std::min<size_t>(size, 4096);  // Probe first page
-            char probe_buf[4096];
-            vm_size_t out_size = 0;
-            kern_return_t kr = vm_read_overwrite(
-                mach_task_self(),
-                reinterpret_cast<vm_address_t>(data_ptr),
-                probe_size,
-                reinterpret_cast<vm_address_t>(probe_buf),
-                &out_size);
-
-            MN_CHECK(kr == KERN_SUCCESS,
-                     MetalNativeError::InvalidArgument,
-                     "wrap_external: source memory is not CPU-accessible "
-                     "(likely an MPS GPU pointer). Use tensor_from_cpu_data() "
-                     "for safe CPU→Metal tensor creation instead.");
-        }
-
-        std::memcpy([buf->impl_->buffer contents], data_ptr, size);
-
-        buf->impl_->size    = size;
-        buf->impl_->mode    = StorageMode::Shared;
-        buf->impl_->no_copy = false;
-        buf->impl_->release_callback = std::move(release_callback);
-        return buf;
-    }
+    MN_CHECK(buf->impl_->buffer != nil,
+             MetalNativeError::AllocationFailed,
+             "wrap_external: newBufferWithBytesNoCopy failed for pointer "
+             "0x" + ([&]{
+                 char hex[32];
+                 snprintf(hex, sizeof(hex), "%lx", (unsigned long)ptr_addr);
+                 return std::string(hex);
+             })() + " (size=" + std::to_string(size) + " bytes). "
+             "The pointer may not be in GPU-accessible shared memory.");
 
     buf->impl_->size    = size;
     buf->impl_->mode    = StorageMode::Shared;
     buf->impl_->no_copy = true;
     buf->impl_->release_callback = std::move(release_callback);
+
+    if (out_offset) {
+        *out_offset = alignment_offset;
+    }
 
     return buf;
 }

@@ -22,6 +22,7 @@ namespace metal_native {
 struct MNDevice::Impl {
     id<MTLDevice>       device       = nil;
     id<MTLCommandQueue> queue        = nil;
+    id<MTLCommandQueue> blit_queue_  = nil;
     std::string         device_name;
     bool                unified      = false;
     size_t              max_buf_len  = 0;
@@ -63,6 +64,9 @@ MNDevice::MNDevice() : impl_(std::make_unique<Impl>()) {
         MN_CHECK(impl_->queue != nil,
                  MetalNativeError::InternalError,
                  "failed to create default MTLCommandQueue");
+
+        impl_->blit_queue_ = [impl_->device newCommandQueue];
+        impl_->blit_queue_.label = @"metal_native.blit";
 
         impl_->device_name  = std::string([[impl_->device name] UTF8String]);
         impl_->unified      = [impl_->device hasUnifiedMemory];
@@ -122,6 +126,10 @@ id<MTLDevice> MNDevice::metal_device() const noexcept {
 
 id<MTLCommandQueue> MNDevice::command_queue() const noexcept {
     return impl_->queue;
+}
+
+id<MTLCommandQueue> MNDevice::blit_queue() const noexcept {
+    return impl_->blit_queue_;
 }
 
 // ---------------------------------------------------------------------------

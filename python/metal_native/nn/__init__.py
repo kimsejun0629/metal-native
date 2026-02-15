@@ -1,9 +1,18 @@
 """Neural network modules for MetalNative.
 
-This package will contain PyTorch-compatible neural network layers,
-loss functions, and other building blocks for deep learning.
-
-Note: Implementation is planned for Phase 4.
+Provides PyTorch-compatible neural network layers optimized for Apple Silicon.
 """
 
-__all__ = []
+from .linear import Linear
+from .normalization import RMSNorm, LayerNorm
+from .activation import ReLU, GELU, SiLU, Softmax
+
+__all__ = [
+    'Linear',
+    'RMSNorm',
+    'LayerNorm',
+    'ReLU',
+    'GELU',
+    'SiLU',
+    'Softmax',
+]

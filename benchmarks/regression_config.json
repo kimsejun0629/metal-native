@@ -1,0 +1,91 @@
+{
+    "benchmarks": [
+        {
+            "name": "matmul_fp16_decode",
+            "category": "matmul",
+            "op": "matmul",
+            "params": {"M": 1, "N": 4096, "K": 4096, "dtype": "float16"},
+            "warmup_iters": 50,
+            "bench_iters": 200,
+            "regression_threshold": 0.05
+        },
+        {
+            "name": "matmul_fp16_small",
+            "category": "matmul",
+            "op": "matmul",
+            "params": {"M": 128, "N": 4096, "K": 4096, "dtype": "float16"},
+            "warmup_iters": 50,
+            "bench_iters": 200,
+            "regression_threshold": 0.05
+        },
+        {
+            "name": "matmul_fp16_medium",
+            "category": "matmul",
+            "op": "matmul",
+            "params": {"M": 512, "N": 4096, "K": 4096, "dtype": "float16"},
+            "warmup_iters": 50,
+            "bench_iters": 200,
+            "regression_threshold": 0.05
+        },
+        {
+            "name": "matmul_fp16_large",
+            "category": "matmul",
+            "op": "matmul",
+            "params": {"M": 2048, "N": 4096, "K": 4096, "dtype": "float16"},
+            "warmup_iters": 50,
+            "bench_iters": 200,
+            "regression_threshold": 0.05
+        },
+        {
+            "name": "attention_fp16_short",
+            "category": "attention",
+            "op": "flash_attention",
+            "params": {"batch": 1, "num_heads": 32, "seq_len": 128, "head_dim": 128, "dtype": "float16"},
+            "warmup_iters": 30,
+            "bench_iters": 100,
+            "regression_threshold": 0.05
+        },
+        {
+            "name": "attention_fp16_medium",
+            "category": "attention",
+            "op": "flash_attention",
+            "params": {"batch": 1, "num_heads": 32, "seq_len": 512, "head_dim": 128, "dtype": "float16"},
+            "warmup_iters": 30,
+            "bench_iters": 100,
+            "regression_threshold": 0.05
+        },
+        {
+            "name": "softmax_fp16_small",
+            "category": "softmax",
+            "op": "softmax",
+            "params": {"batch": 1, "rows": 32, "cols": 4096, "dtype": "float16"},
+            "warmup_iters": 50,
+            "bench_iters": 200,
+            "regression_threshold": 0.05
+        },
+        {
+            "name": "rmsnorm_fp16",
+            "category": "normalization",
+            "op": "rmsnorm",
+            "params": {"batch": 1, "seq_len": 512, "hidden": 4096, "dtype": "float16"},
+            "warmup_iters": 50,
+            "bench_iters": 200,
+            "regression_threshold": 0.05
+        },
+        {
+            "name": "swiglu_fp16",
+            "category": "activation",
+            "op": "swiglu",
+            "params": {"batch": 1, "seq_len": 512, "hidden": 4096, "dtype": "float16"},
+            "warmup_iters": 50,
+            "bench_iters": 200,
+            "regression_threshold": 0.05
+        }
+    ],
+    "baseline_dir": "benchmarks/baselines",
+    "report_dir": "benchmarks/reports",
+    "regression_threshold_default": 0.05,
+    "improvement_threshold": 0.03,
+    "min_samples": 100,
+    "outlier_removal": "iqr"
+}

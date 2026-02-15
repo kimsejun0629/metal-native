@@ -65,12 +65,19 @@ public:
 
     /// The default command queue created at init time.
     id<MTLCommandQueue> command_queue() const noexcept;
+
+    /// Secondary command queue for async blit/copy operations.
+    /// Enables overlapping compute and memory transfers.
+    id<MTLCommandQueue> blit_queue() const noexcept;
 #else
     /// Opaque handle to the underlying MTLDevice (cast to id<MTLDevice> in .mm).
     void* metal_device() const noexcept;
 
     /// Opaque handle to the default MTLCommandQueue.
     void* command_queue() const noexcept;
+
+    /// Opaque handle to the blit MTLCommandQueue.
+    void* blit_queue() const noexcept;
 #endif
 
     // -- Synchronization -----------------------------------------------------
@@ -109,7 +116,7 @@ private:
 
     struct Impl;
     std::unique_ptr<Impl> impl_;
-    std::atomic<bool> prefer_private_storage_{false};
+    std::atomic<bool> prefer_private_storage_{true};
 };
 
 } // namespace metal_native

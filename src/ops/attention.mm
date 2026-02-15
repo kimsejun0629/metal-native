@@ -5,6 +5,7 @@
 #import <Foundation/Foundation.h>
 
 #include "metal_native/ops/attention.h"
+#include "metal_native/ops/elementwise.h"
 #include "metal_native/core/tensor.h"
 #include "metal_native/core/device.h"
 #include "metal_native/core/error.h"
@@ -15,6 +16,17 @@
 #include <cstring>
 
 namespace metal_native {
+
+// Global flag for texture-backed attention (experimental)
+static bool g_use_texture_attention = false;
+
+void set_texture_attention(bool enable) {
+    g_use_texture_attention = enable;
+}
+
+bool texture_attention_enabled() {
+    return g_use_texture_attention;
+}
 
 namespace {
 
@@ -40,10 +52,10 @@ MNTensor flash_attention(const MNTensor& query,
              "flash_attention: query must be 4D [batch, num_heads, seq_len_q, head_dim]");
     MN_CHECK(key.ndim() == 4,
              MetalNativeError::InvalidArgument,
-             "flash_attention: key must be 4D [batch, num_heads, seq_len_k, head_dim]");
+             "flash_attention: key must be 4D [batch, num_kv_heads, seq_len_k, head_dim]");
     MN_CHECK(value.ndim() == 4,
              MetalNativeError::InvalidArgument,
-             "flash_attention: value must be 4D [batch, num_heads, seq_len_v, head_dim]");
+             "flash_attention: value must be 4D [batch, num_kv_heads, seq_len_v, head_dim]");
 
     MN_CHECK(query.dtype() == key.dtype() && query.dtype() == value.dtype(),
              MetalNativeError::InvalidArgument,
@@ -53,6 +65,7 @@ MNTensor flash_attention(const MNTensor& query,
     const int64_t num_heads = query.shape()[1];
     const int64_t seq_len_q = query.shape()[2];
     const int64_t head_dim = query.shape()[3];
+    const int64_t num_kv_heads = key.shape()[1];
     const int64_t seq_len_k = key.shape()[2];
     const int64_t seq_len_v = value.shape()[2];
 
@@ -64,9 +77,17 @@ MNTensor flash_attention(const MNTensor& query,
              MetalNativeError::InvalidArgument,
              "flash_attention: batch dimensions must match");
 
-    MN_CHECK(num_heads == key.shape()[1] && num_heads == value.shape()[1],
+    MN_CHECK(num_kv_heads == value.shape()[1],
              MetalNativeError::InvalidArgument,
-             "flash_attention: num_heads must match across inputs");
+             "flash_attention: num_kv_heads must match between key and value");
+
+    MN_CHECK(num_heads >= num_kv_heads,
+             MetalNativeError::InvalidArgument,
+             "flash_attention: num_heads must be >= num_kv_heads");
+
+    MN_CHECK(num_heads % num_kv_heads == 0,
+             MetalNativeError::InvalidArgument,
+             "flash_attention: num_heads must be divisible by num_kv_heads");
 
     MN_CHECK(head_dim == key.shape()[3] && head_dim == value.shape()[3],
              MetalNativeError::InvalidArgument,
@@ -85,43 +106,188 @@ MNTensor flash_attention(const MNTensor& query,
     @autoreleasepool {
         MNDevice& device = MNDevice::instance();
 
-        // Allocate output tensor (GPU-only when preferred for reduced TLB pressure)
-        StorageMode out_mode = device.prefer_private_storage() ? StorageMode::Private : StorageMode::Shared;
-        MNTensor output = MNTensor::empty(query.shape(), query.dtype(), device, out_mode);
+        // Always use Shared storage for attention output.
+        // Private storage causes blit-copy issues when reading results back to CPU,
+        // and the 3-8% TLB savings is not worth the correctness complexity.
+        MNTensor output = MNTensor::empty(query.shape(), query.dtype(), device, StorageMode::Shared);
+
+        // Detect GQA/MQA: num_kv_heads < num_heads
+        const bool is_gqa = (num_kv_heads < num_heads);
+        const uint32_t group_ratio = static_cast<uint32_t>(num_heads / num_kv_heads);
 
         // Select kernel based on dtype (use SIMD versions for AMX acceleration)
         const char* kernel_name = nullptr;
         MTLSize threadgroup_size;
 
         if (query.dtype() == MNDType::Float32) {
-            kernel_name = "flash_attention_simd_kernel";
-            threadgroup_size = MTLSizeMake(32, 1, 1);  // 1 SIMD group
-        } else if (query.dtype() == MNDType::Float16) {
-            // Use larger tile when head_dim fits in 32KB threadgroup memory
-            // and memory pressure is normal (budget allows performance optimization)
-            float pressure_mult = MemoryBudgetController::instance().pressure_multiplier();
+            if (is_gqa) {
+                // Auto-cast FP32 to FP16 for GQA (FP32 GQA kernel would exceed 32KB threadgroup memory)
+                // Use GPU kernels for dtype conversion (replaces slow CPU scalar loops)
+                MNTensor q_fp16 = cast_dtype(query, MNDType::Float16, device);
+                MNTensor k_fp16 = cast_dtype(key, MNDType::Float16, device);
+                MNTensor v_fp16 = cast_dtype(value, MNDType::Float16, device);
 
-            // Memory pressure fallback: use smaller tile to minimize threadgroup memory
-            // tile16 uses ~17KB vs tile24's ~29KB for FP16+head_dim=128
-            // At Warning or Critical pressure, conserve threadgroup memory
-            bool use_tile24 = (head_dim <= 128 && pressure_mult >= 1.0f);
+                // Cast mask if present
+                const MNTensor* mask_fp16_ptr = nullptr;
+                std::unique_ptr<MNTensor> mask_fp16;
+                if (mask != nullptr) {
+                    mask_fp16 = std::make_unique<MNTensor>(cast_dtype(*mask, MNDType::Float16, device));
+                    mask_fp16_ptr = mask_fp16.get();
+                }
 
-            // Use multi-SIMD kernel for FP16 when sequence length benefits from parallelism
-            // The multi-SIMD variant uses 2 SIMD groups (64 threads) for:
-            // - 2x faster cooperative K/V tile loading
-            // - Parallel computation of 8x16 score blocks
-            // Memory footprint is identical to tile16 (17,408 bytes)
-            bool use_multi_simd = (seq_len_k >= 64);  // Benefit from parallelism
+                // Run FP16 GQA attention
+                MNTensor result_fp16 = flash_attention(q_fp16, k_fp16, v_fp16, mask_fp16_ptr, scale);
 
-            if (use_tile24) {
-                kernel_name = "flash_attention_simd_kernel_fp16_tile24";
-                threadgroup_size = MTLSizeMake(32, 1, 1);  // 1 SIMD group
-            } else if (use_multi_simd) {
-                kernel_name = "flash_attention_simd_kernel_fp16_multi";
-                threadgroup_size = MTLSizeMake(64, 1, 1);  // 2 SIMD groups
+                // Cast result back to FP32 (GPU kernel)
+                MNTensor result_fp32 = cast_dtype(result_fp16, MNDType::Float32, device);
+
+                return result_fp32;
+            }
+
+            // Texture-backed attention path (FP32 MHA only, experimental)
+            if (!is_gqa && g_use_texture_attention) {
+                // Create score texture (TEX_TILE_SIZE x TEX_TILE_SIZE)
+                MTLTextureDescriptor* tex_desc = [[MTLTextureDescriptor alloc] init];
+                tex_desc.textureType = MTLTextureType2D;
+                tex_desc.pixelFormat = MTLPixelFormatR32Float;
+                tex_desc.width = 16;  // TEX_TILE_SIZE
+                tex_desc.height = 16; // TEX_TILE_SIZE
+                tex_desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+                tex_desc.storageMode = MTLStorageModePrivate;
+
+                id<MTLTexture> score_texture = [device.metal_device() newTextureWithDescriptor:tex_desc];
+
+                if (score_texture != nil) {
+                    // Use texture path
+                    kernel_name = "flash_attention_texture_fp32";
+                    id<MTLComputePipelineState> pipeline = KernelRegistry::instance().get_pipeline(kernel_name);
+                    CommandPipeline& cmd_pipeline = device.command_pipeline();
+                    id<MTLCommandBuffer> cmd_buffer = cmd_pipeline.current_buffer();
+                    id<MTLComputeCommandEncoder> encoder = [cmd_buffer computeCommandEncoder];
+
+                    [encoder setComputePipelineState:pipeline];
+                    [encoder setBuffer:query.buffer()->metal_buffer() offset:query.offset() atIndex:0];
+                    [encoder setBuffer:key.buffer()->metal_buffer() offset:key.offset() atIndex:1];
+                    [encoder setBuffer:value.buffer()->metal_buffer() offset:value.offset() atIndex:2];
+                    if (mask != nullptr) {
+                        [encoder setBuffer:mask->buffer()->metal_buffer() offset:mask->offset() atIndex:3];
+                    } else {
+                        [encoder setBuffer:nil offset:0 atIndex:3];
+                    }
+                    [encoder setBuffer:output.buffer()->metal_buffer() offset:output.offset() atIndex:4];
+
+                    uint32_t batch_u32 = static_cast<uint32_t>(batch);
+                    uint32_t num_heads_u32 = static_cast<uint32_t>(num_heads);
+                    uint32_t seq_len_q_u32 = static_cast<uint32_t>(seq_len_q);
+                    uint32_t seq_len_k_u32 = static_cast<uint32_t>(seq_len_k);
+                    uint32_t head_dim_u32 = static_cast<uint32_t>(head_dim);
+                    bool has_mask = (mask != nullptr);
+
+                    [encoder setBytes:&batch_u32 length:sizeof(uint32_t) atIndex:5];
+                    [encoder setBytes:&num_heads_u32 length:sizeof(uint32_t) atIndex:6];
+                    [encoder setBytes:&seq_len_q_u32 length:sizeof(uint32_t) atIndex:7];
+                    [encoder setBytes:&seq_len_k_u32 length:sizeof(uint32_t) atIndex:8];
+                    [encoder setBytes:&head_dim_u32 length:sizeof(uint32_t) atIndex:9];
+                    [encoder setBytes:&scale length:sizeof(float) atIndex:10];
+                    [encoder setBytes:&has_mask length:sizeof(bool) atIndex:11];
+
+                    [encoder setTexture:score_texture atIndex:0];
+
+                    uint32_t tile_size = 16;
+                    [encoder setThreadgroupMemoryLength:tile_size * head_dim * sizeof(float) atIndex:0]; // shared_Q
+                    [encoder setThreadgroupMemoryLength:tile_size * head_dim * sizeof(float) atIndex:1]; // shared_K/V
+                    [encoder setThreadgroupMemoryLength:tile_size * head_dim * sizeof(float) atIndex:2]; // shared_output
+
+                    uint32_t num_q_tiles = (seq_len_q + tile_size - 1) / tile_size;
+                    MTLSize grid_size = MTLSizeMake(num_q_tiles, num_heads, batch);
+                    threadgroup_size = MTLSizeMake(32, 1, 1);
+
+                    [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:threadgroup_size];
+                    [encoder endEncoding];
+                    cmd_pipeline.commit_and_continue();
+
+                    return output;
+                }
+                // Fallback: texture creation failed, use normal path below
+            }
+
+            if (seq_len_k >= 1024) {
+                kernel_name = "flash_attention_large_fp32";
+                threadgroup_size = MTLSizeMake(256, 1, 1);
+            } else if (seq_len_k >= 256 && head_dim <= 128) {
+                kernel_name = "flash_attention_4simd_fp32";
+                threadgroup_size = MTLSizeMake(128, 1, 1);  // 4 SIMD groups
             } else {
-                kernel_name = "flash_attention_simd_kernel_fp16";
+                kernel_name = "flash_attention_simd_kernel";
                 threadgroup_size = MTLSizeMake(32, 1, 1);  // 1 SIMD group
+            }
+        } else if (query.dtype() == MNDType::Float16) {
+            if (is_gqa) {
+                // GQA Dispatch Decision Tree:
+                // - seq_len_k >= 512: Use 4-SIMD kernel for high parallelism (barrier overhead is amortized)
+                // - seq_len_k < 512: Use 1-SIMD kernel (barrier overhead dominates for short sequences)
+                //
+                // Note: 2-SIMD GQA kernel does not exist. For medium sequences (256-511), 1-SIMD
+                // is preferred due to lower barrier/synchronization overhead vs limited parallelism gain.
+
+                if (seq_len_k >= 512) {
+                    // Long sequences: barrier overhead is amortized, parallelism wins
+                    kernel_name = "flash_attention_gqa_4simd_fp16";
+                    threadgroup_size = MTLSizeMake(128, 1, 1);  // 4 SIMD groups
+                } else {
+                    // Short/medium sequences: use standard 1-SIMD GQA kernel
+                    kernel_name = "flash_attention_gqa_fp16";
+                    threadgroup_size = MTLSizeMake(32, 1, 1);  // 1 SIMD group
+                }
+            } else {
+                // MHA Dispatch Decision Tree:
+                // Factors: seq_len_k, head_dim, memory pressure
+                //
+                // 1. 4-SIMD kernel (128 threads, 4 SIMD groups):
+                //    - Best for: long sequences (>= 256) with moderate head_dim (<= 128)
+                //    - Barrier overhead is amortized over many tiles
+                //    - Memory: ~17,536 bytes (fits 32KB), tile16 layout
+                //
+                // 2. tile24 kernel (1 SIMD, larger tiles):
+                //    - Best for: medium sequences with head_dim <= 128
+                //    - Reduces tile iteration overhead
+                //
+                // 3. 2-SIMD kernel (64 threads, 2 SIMD groups):
+                //    - Best for: medium sequences (>= 64)
+                //    - Moderate parallelism without excessive barrier overhead
+                //
+                // 4. 1-SIMD kernel (32 threads, baseline):
+                //    - Best for: short sequences (< 64)
+                //    - Lowest overhead, simplest synchronization
+
+                float pressure_mult = MemoryBudgetController::instance().pressure_multiplier();
+
+                // 8-SIMD (256 threads): best for very long sequences
+                bool use_8simd = (seq_len_k >= 1024 && head_dim <= 128 && pressure_mult >= 1.0f);
+
+                // 4-SIMD (128 threads): good for long sequences
+                // No memory pressure gate -- same threadgroup memory as tile16 (17,408 bytes)
+                bool use_4simd = (!use_8simd && seq_len_k >= 256 && head_dim <= 128);
+
+                bool use_tile24 = (!use_8simd && !use_4simd && head_dim <= 128 && pressure_mult >= 1.0f);
+                bool use_multi_simd = (seq_len_k >= 64);
+
+                if (use_8simd) {
+                    kernel_name = "flash_attention_large_fp16";
+                    threadgroup_size = MTLSizeMake(256, 1, 1);
+                } else if (use_4simd) {
+                    kernel_name = "flash_attention_4simd_fp16";
+                    threadgroup_size = MTLSizeMake(128, 1, 1);  // 4 SIMD groups
+                } else if (use_tile24) {
+                    kernel_name = "flash_attention_simd_kernel_fp16_tile24";
+                    threadgroup_size = MTLSizeMake(32, 1, 1);  // 1 SIMD group
+                } else if (use_multi_simd) {
+                    kernel_name = "flash_attention_simd_kernel_fp16_multi";
+                    threadgroup_size = MTLSizeMake(64, 1, 1);  // 2 SIMD groups
+                } else {
+                    kernel_name = "flash_attention_simd_kernel_fp16";
+                    threadgroup_size = MTLSizeMake(32, 1, 1);  // 1 SIMD group
+                }
             }
         } else {
             MN_THROW(MetalNativeError::InvalidArgument,
@@ -171,30 +337,58 @@ MNTensor flash_attention(const MNTensor& query,
         [encoder setBytes:&scale length:sizeof(float) atIndex:10];
         [encoder setBytes:&has_mask length:sizeof(bool) atIndex:11];
 
+        // GQA-specific parameters
+        if (is_gqa) {
+            MN_CHECK(num_kv_heads <= UINT32_MAX, MetalNativeError::InvalidArgument, "attention: dimension exceeds uint32_t range");
+            uint32_t num_kv_heads_u32 = static_cast<uint32_t>(num_kv_heads);
+            [encoder setBytes:&num_kv_heads_u32 length:sizeof(uint32_t) atIndex:12];
+            [encoder setBytes:&group_ratio length:sizeof(uint32_t) atIndex:13];
+        }
+
         // Calculate threadgroup memory size for SIMD kernel
         // shared_K is reused for V (they're never alive simultaneously)
         size_t element_size = (query.dtype() == MNDType::Float32) ? sizeof(float) : sizeof(uint16_t);
 
+        // Check if using large 256-thread kernel
+        bool using_large_kernel = (kernel_name != nullptr &&
+            (std::strcmp(kernel_name, "flash_attention_large_fp32") == 0 ||
+             std::strcmp(kernel_name, "flash_attention_large_fp16") == 0));
+
         // Determine active tile size based on selected kernel
         uint32_t active_tile_size = TILE_SIZE;
-        if (kernel_name && std::strcmp(kernel_name, "flash_attention_simd_kernel_fp16_tile24") == 0) {
+        if (using_large_kernel) {
+            active_tile_size = 16;  // ATTN_LARGE_TILE
+        } else if (kernel_name && std::strcmp(kernel_name, "flash_attention_simd_kernel_fp16_tile24") == 0) {
             active_tile_size = TILE_SIZE_24;
         }
 
         // shared_Q: threadgroup(0)
         [encoder setThreadgroupMemoryLength:active_tile_size * head_dim * element_size atIndex:0];
-        // shared_KV: threadgroup(1) - K then V (aliased)
+        // shared_K: threadgroup(1) - K tile (for GQA: persistent across Q heads; for MHA: K then V aliased)
         [encoder setThreadgroupMemoryLength:active_tile_size * head_dim * element_size atIndex:1];
         // shared_scores: threadgroup(2) - always FP32
         [encoder setThreadgroupMemoryLength:active_tile_size * active_tile_size * sizeof(float) atIndex:2];
         // shared_output: threadgroup(3) - always FP32 for accumulation
         [encoder setThreadgroupMemoryLength:active_tile_size * head_dim * sizeof(float) atIndex:3];
 
-        // Dispatch threadgroups for SIMD kernel
-        // Grid: [num_q_tiles, num_heads, batch]
-        uint32_t num_q_tiles = (seq_len_q + active_tile_size - 1) / active_tile_size;
+        // GQA kernel uses separate K and V buffers to load each once per tile
+        if (is_gqa) {
+            // shared_V: threadgroup(4) - V tile (separate from K for K/V reuse)
+            [encoder setThreadgroupMemoryLength:active_tile_size * head_dim * element_size atIndex:4];
+        }
 
-        MTLSize grid_size = MTLSizeMake(num_q_tiles, num_heads, batch);
+        // Large 256-thread kernels need shared_reduction at threadgroup(4) for inter-SIMD reduction
+        if (using_large_kernel) {
+            // shared_reduction: threadgroup(4) - 8 floats for inter-SIMD reduction
+            [encoder setThreadgroupMemoryLength:8 * sizeof(float) atIndex:4];
+        }
+
+        // Dispatch threadgroups for SIMD kernel
+        // Grid: [num_q_tiles, num_kv_heads (GQA) or num_heads (MHA), batch]
+        uint32_t num_q_tiles = (seq_len_q + active_tile_size - 1) / active_tile_size;
+        uint32_t grid_y = is_gqa ? static_cast<uint32_t>(num_kv_heads) : num_heads_u32;
+
+        MTLSize grid_size = MTLSizeMake(num_q_tiles, grid_y, batch);
 
         [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:threadgroup_size];
 
